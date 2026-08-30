@@ -121,6 +121,22 @@ resource "google_project_iam_member" "cloudbuild_default" {
 # neither change nor delete.
 # ---------------------------------------------------------------------------
 
+# A service-enable API call returns before the service is actually serving.
+# Measured on a cold project: terraform enabled iam.googleapis.com, waited for the
+# operation, and the very next resource died on
+#   403 Permission 'iam.workloadIdentityPools.create' denied
+# A second `terraform apply` then converged with no changes to the config -- the
+# classic signature of enablement lag, not of a missing permission. depends_on
+# cannot express "and is now serving", so this waits.
+#
+# It costs 60s on every apply, including ones that would not have raced. That is
+# the right trade for the FIRST command of the lab: a hard 403 there is
+# indistinguishable, to a participant, from a broken PAT or a wrong project.
+resource "time_sleep" "services_ready" {
+  depends_on      = [google_project_service.svc]
+  create_duration = "60s"
+}
+
 resource "google_storage_bucket" "tfstate" {
   name                        = "${var.project_id}-${var.name_prefix}-tfstate"
   location                    = var.region

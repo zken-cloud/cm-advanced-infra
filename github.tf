@@ -7,7 +7,7 @@ resource "google_iam_workload_identity_pool" "github" {
   count                     = var.create_wif_pool ? 1 : 0
   workload_identity_pool_id = var.wif_pool_id
   display_name              = "GitHub (CodeMender lab)"
-  depends_on                = [google_project_service.svc]
+  depends_on                = [time_sleep.services_ready]
 }
 
 locals {
@@ -36,7 +36,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     issuer_uri = "https://token.actions.githubusercontent.com"
   }
 
-  depends_on = [google_iam_workload_identity_pool.github]
+  depends_on = [google_iam_workload_identity_pool.github, time_sleep.services_ready]
 }
 
 # ---------------------------------------------------------------------------
