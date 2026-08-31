@@ -31,6 +31,14 @@ run cp -r "$GUIDE/targets/harvest-fp-cases" "$H/cm-lab/"
 # layout alone.
 run mkdir -p "$H/cm-lab/targets"
 run cp -r "$GUIDE/targets/oracle-specs" "$H/cm-lab/targets/"
+# The canary is the positive control for the exploit harness: it must FIRE on a
+# vulnerable fixture and stay SILENT on a fixed one. test_harness_health.py looks
+# for it at infra/runner-image/canary, and setup-tree has never copied infra/ --
+# so that check has always failed in a participant's tree while passing in the
+# repo. A harness-health suite that cannot exercise the harness is the exact
+# blind spot it exists to close (invariant 7).
+run mkdir -p "$H/cm-lab/infra/runner-image"
+run cp -r "$GUIDE/infra/runner-image/canary" "$H/cm-lab/infra/runner-image/"
 rm -rf "$H/cm-lab/pipeline/__pycache__" "$H/cm-lab/pipeline/.pytest_cache"
 
 # `.cm/*` with a negation, never `.cm/`: git cannot re-include a path inside an
