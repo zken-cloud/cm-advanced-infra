@@ -52,7 +52,7 @@ CWE_CLASS = {
     # CWE-400 USED TO MAP HERE and that was wrong. It is Uncontrolled Resource
     # Consumption -- it covers a regex that backtracks AND a cache that never frees,
     # and those need opposite instruments. The live ledger has `cwe-400` on
-    # `tracking.middleware.js`, a retention bug, which this map was pointing at a
+    # `telemetry.middleware.js`, a retention bug, which this map was pointing at a
     # stopwatch. A CWE that cannot name its own oracle must not pretend to: it routes
     # to `resource-exhaustion`, which needs an oracle and names none, so only an
     # explicit fp3 entry in a target's oracle spec can prove it.

@@ -34,13 +34,56 @@ SPEC_DIR = os.path.join(ROOT, "targets", "oracle-specs")
 
 
 def _spec():
-    import yaml
-    return yaml.safe_load(open(os.path.join(SPEC_DIR, "vulnerable-app.yaml")))
+    """Inline, not read from disk. This repository ships no target spec -- one that
+    names a target's vulnerable functions is an answer key -- and a test of the
+    MATCHER should not need real coordinates to exercise it. Shapes are what matter
+    here: an exact fp3, a basename that must match a full path, a wildcard, and a
+    class-only fallback."""
+    return {
+        "target": "example-app",
+        "app": {"base": "http://127.0.0.1:3111",
+                "install": ["npm", "install", "--omit=dev"],
+                "boot": ["node", "src/server.js"]},
+        "oracles": [
+            {"match": {"fp3": "checks.middleware.js::validateEmailDomain"},
+             "oracle": "wall-clock-timeout-oracle",
+             "claim": "A crafted input drives a dynamically built RegExp into "
+                      "catastrophic backtracking, past a bound the benign control meets.",
+             "params": {"path": "/api/v1/register", "benign": {"email": "user@example.com"},
+                        "malicious": {"email": "a" * 36 + "!"},
+                        "bound_s": 0.5, "timeout": 30}},
+            {"match": {"fp3": "tokenUtil.js::makeSessionId"},
+             "oracle": "predictability-oracle", "claim": "Session ids are predictable.",
+             "params": {"path": "/api/v1/session", "samples": 200}},
+            {"match": {"fp3": "assetCache.js::storeHeader"},
+             "oracle": "rss-growth-oracle", "claim": "Cached slices retain their parent buffer.",
+             "params": {"path": "/api/v1/asset", "iterations": 500}},
+            {"match": {"fp3": "telemetry.middleware.js::*"},
+             "oracle": "rss-growth-oracle", "claim": "A closure retains per-request state.",
+             "params": {"path": "/api/v1/track", "iterations": 500}},
+        ],
+    }
 
+
+
+_SPEC_FILE = None
+
+
+def _spec_file():
+    """`--spec` takes a path, and there is no target spec on disk here by design.
+    Materialise the inline fixture once instead of pointing at instructor material."""
+    global _SPEC_FILE
+    if _SPEC_FILE is None:
+        import tempfile, yaml
+        fd = os.path.join(tempfile.mkdtemp(), "example-app.yaml")
+        with open(fd, "w") as f:
+            yaml.safe_dump(_spec(), f)
+        _SPEC_FILE = fd
+    return _SPEC_FILE
 
 # ---------------------------------------------------------------- matching
 def t_exact_fp3_matches():
-    e = R.select(_spec(), "cryptoUtils.js::generateSessionContextId", "weak-random")
+    e = R.select(_spec(), "tokenUtil.js::makeSessionId", "weak-random")
     assert e and e["oracle"] == "predictability-oracle", e
 
 
@@ -48,7 +91,7 @@ def t_prod_style_full_path_matches_basename_spec():
     """relpath is basename in the lab and clone-root-relative in prod. A spec
     written against one form must match the other, or every finding silently
     degrades to unproven the day the path form changes."""
-    e = R.select(_spec(), "src/api/middlewares/validation.middleware.js::validateCorporateEmail",
+    e = R.select(_spec(), "src/api/middlewares/checks.middleware.js::validateEmailDomain",
                  "redos")
     assert e and e["oracle"] == "wall-clock-timeout-oracle", e
 
@@ -59,12 +102,12 @@ def t_fp3_entry_wins_over_a_functional_cwe_class():
     it was never consulted. fp3 is the STABLE key (D17); the class is the one field
     identity deliberately excludes. Selection must not depend on the class when an
     fp3 entry exists."""
-    e = R.select(_spec(), "mediaCache.js::extractAndCacheHeader", "prototype-pollution")
+    e = R.select(_spec(), "assetCache.js::storeHeader", "prototype-pollution")
     assert e and e["oracle"] == "rss-growth-oracle", e
 
 
 def t_file_wildcard_matches():
-    e = R.select(_spec(), "tracking.middleware.js::anythingAtAll", "memory-leak-gc")
+    e = R.select(_spec(), "telemetry.middleware.js::anythingAtAll", "memory-leak-gc")
     assert e and e["oracle"] == "rss-growth-oracle", e
 
 
@@ -84,9 +127,9 @@ def t_ambiguous_suffix_refuses():
 
 
 def t_suffix_respects_segment_boundary():
-    """`cache.js` must not match `mediaCache.js`."""
+    """`cache.js` must not match `assetCache.js`."""
     spec = {"oracles": [{"match": {"fp3": "cache.js::get"}, "oracle": "x"}]}
-    assert R.select(spec, "mediaCache.js::get", "redos") is None
+    assert R.select(spec, "assetCache.js::get", "redos") is None
 
 
 def t_class_fallback_is_last():
@@ -118,7 +161,7 @@ def t_missing_spec_file_is_unproven(tmp="/tmp/_or_missing.json"):
 
 def t_unmatched_finding_is_unproven_and_says_so(tmp="/tmp/_or_nomatch.json"):
     _run(["--fp3", "nothing.js::here", "--cwe-class", "redos",
-          "--spec", os.path.join(SPEC_DIR, "vulnerable-app.yaml"),
+          "--spec", _spec_file(),
           "--project-root", "/tmp", "--out", tmp])
     d = json.load(open(tmp))
     assert d["verdict"] == "unproven", d
@@ -129,8 +172,8 @@ def t_unmatched_finding_is_unproven_and_says_so(tmp="/tmp/_or_nomatch.json"):
 
 def t_boot_failure_is_setup_failed_not_a_negative(tmp="/tmp/_or_boot.json"):
     """Invariant 6. An app that never started tells us nothing about the bug."""
-    _run(["--fp3", "cryptoUtils.js::generateSessionContextId", "--cwe-class", "weak-random",
-          "--spec", os.path.join(SPEC_DIR, "vulnerable-app.yaml"),
+    _run(["--fp3", "tokenUtil.js::makeSessionId", "--cwe-class", "weak-random",
+          "--spec", _spec_file(),
           "--project-root", "/tmp/definitely-not-a-checkout", "--out", tmp])
     d = json.load(open(tmp))
     assert d["verdict"] == "setup_failed", d
@@ -203,7 +246,7 @@ def t_banked_bundle_is_admissible_as_a_regression_oracle():
     dest = tempfile.mkdtemp()
     spec = _spec()
     entry = spec["oracles"][0]
-    R.bank(dest, spec, entry, {"fp3": "validation.middleware.js::validateCorporateEmail",
+    R.bank(dest, spec, entry, {"fp3": "checks.middleware.js::validateEmailDomain",
                                "cwe_class": "redos", "verdict": "verified"})
     for f in ("replay.sh", "oracle-spec.yaml", "cm-oracle.json"):
         assert os.path.exists(os.path.join(dest, f)), f"bundle missing {f}"

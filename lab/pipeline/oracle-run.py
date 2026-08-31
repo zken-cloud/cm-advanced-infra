@@ -32,8 +32,8 @@ Evidence always carries the spec's `claim` string, so the ledger records the nar
 property that was proven rather than the CWE's worst-case reading. Whether that
 property matters is `impact_review`, and that is a human's (D28).
 
-  oracle-run.py --fp3 'cryptoUtils.js::generateSessionContextId' \
-                --cwe-class weak-random --spec targets/oracle-specs/vulnerable-app.yaml \
+  oracle-run.py --fp3 'tokenUtil.js::makeSessionId' \
+                --cwe-class weak-random --spec targets/oracle-specs/<your-target>.yaml \
                 --project-root /work/clone --out /tmp/oracle.json
 """
 import os
@@ -192,7 +192,7 @@ def _suffix(spec_path, actual_path):
 
     `consolidate-dedup.relpath` is basename today and clone-root-relative in prod,
     so a spec written against one form must still match the other. The boundary
-    check is what keeps `cache.js` from matching `mediaCache.js`."""
+    check is what keeps `cache.js` from matching `assetCache.js`."""
     if spec_path == actual_path:
         return True
     return actual_path.endswith("/" + spec_path) or spec_path.endswith("/" + actual_path)
