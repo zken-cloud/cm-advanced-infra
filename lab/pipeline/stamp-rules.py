@@ -21,7 +21,7 @@ the non-bypassable control; the hook is a convenience, and a convenience that
 blocks correct work is not one.
 
     python3 stamp-rules.py --ledger cm-ledger.db \\
-        --rules pipeline/harvested-rules/vulnerable-app-harvested.yaml \\
+        --rules pipeline/harvested-rules/<your-harvested>.yaml \\
         --map cm-harvested-<cwe>-<hash>=fp3:<fingerprint>
 
 Unmapped rules are left advisory, on purpose.

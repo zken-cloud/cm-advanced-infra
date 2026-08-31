@@ -2,7 +2,7 @@
 """The answer key must never be readable by the agent. python3 test_answer_key_scope.py
 
 README 0f copies `pipeline/` into the participant's lab repo, and that repo IS the
-tree the find pod clones. `pipeline/harvested-rules/vulnerable-app-harvested.yaml`
+tree the find pod clones. Any `pipeline/harvested-rules/*.yaml`
 maps a runnable pattern to each finding a participant has verified, so it is an
 answer key sitting inside the scanned tree by construction -- whether it was
 shipped or harvested in Step 7.

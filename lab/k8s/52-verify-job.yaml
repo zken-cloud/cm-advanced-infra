@@ -306,10 +306,13 @@ spec:
               # file never exists, the whole oracle block is skipped SILENTLY, and
               # every oracle-class finding quietly falls through to `cm verify` while
               # the router's guessed harness is still recorded. Try the repo name,
-              # then an explicit override, then the upstream target the lab clones.
+              # then an explicit override. There is no third fallback to a shipped
+              # target spec: this image ships none, because a spec naming a target's
+              # vulnerable functions is an answer key. Write one for the findings you
+              # verified (targets/oracle-specs/README.md) and name it after your repo,
+              # or point CM_ORACLE_SPEC at it.
               ORACLE_SPEC="/opt/cm/oracle-specs/$(basename '__REPO__').yaml"
               [ -f "$ORACLE_SPEC" ] || [ -z "${CM_ORACLE_SPEC:-}" ] || ORACLE_SPEC="$CM_ORACLE_SPEC"
-              [ -f "$ORACLE_SPEC" ] || ORACLE_SPEC=/opt/cm/oracle-specs/vulnerable-app.yaml
               ORACLE_RAN=0
               if [ ! -f "$ORACLE_SPEC" ]; then
                 # loud, because silence here is indistinguishable from "oracle ran
