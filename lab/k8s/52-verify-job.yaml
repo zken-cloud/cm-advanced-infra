@@ -1,0 +1,536 @@
+# Phase-2 verify fan-out (severity-selected). One pod per selected fingerprint.
+# dispatch.json (from pipeline/verify-select.py) is mounted via a ConfigMap; each
+# indexed pod verifies ITS entry. The pod maps the central fingerprint -> a local
+# finding_id by (canonical_path, cwe) — no tree-sitter needed. __N__/__IMG__/
+# __REPO__/__SCRUB__ are substituted by run-twophase.sh.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: cm-verify, namespace: cm}
+spec:
+  completions: __N__
+  parallelism: __N__
+  completionMode: Indexed
+  # Verify pods are INDEPENDENT: one finding's exploit failing says nothing about
+  # the other N-1. `backoffLimit: 0` on an Indexed Job does not mean "no retries",
+  # it means the FIRST pod failure fails the Job and terminates its siblings. On
+  # 2026-08-25 index 0 died on a missing file three minutes in and took three
+  # healthy pods with it, mid-verify, publishing nothing at all.
+  #
+  # Per-index budgets instead: an index may fail without ending the run, and
+  # maxFailedIndexes = the whole fan-out means every pod gets to finish and
+  # publish. The Job is still marked Failed if indexes failed -- the reconciler
+  # folds a failed verify Job precisely because the verdicts are the data.
+  # Finished Jobs are not free: they hold Pod objects and their logs. Ten had
+  # accumulated before this was added. An hour is long enough to read a failure and
+  # short enough that the namespace does not become a graveyard.
+  ttlSecondsAfterFinished: 3600
+  backoffLimitPerIndex: 1
+  maxFailedIndexes: __N__
+  backoffLimit: __N__
+  template:
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: cm-lab-runner
+      restartPolicy: Never
+      volumes:
+        - name: dispatch
+          configMap: {name: cm-dispatch}
+      containers:
+        - name: verify
+          image: __IMG__
+          volumeMounts:
+            - {name: dispatch, mountPath: /etc/cm}
+          env:
+            - {name: GOOGLE_CLOUD_PROJECT, value: __PROJECT__}
+            - {name: BUCKET, value: __BUCKET__}
+            - {name: POC_BUCKET, value: __POCBUCKET__}
+            - {name: GH_TOKEN, valueFrom: {secretKeyRef: {name: gh-token, key: token, optional: true}}}
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -uo pipefail
+              I=${JOB_COMPLETION_INDEX:-0}
+              export HOME=/home/cm/v$I; mkdir -p $HOME/.codemender
+              cp /etc/codemender/config.yaml $HOME/.codemender/config.yaml
+              cp /etc/codemender/command_policy.yaml $HOME/.codemender/command_policy.yaml
+              # this pod's assignment
+              read FP CPATH ATT CWES SHARD < <(python3 -c "
+              import json
+              d=json.load(open('/etc/cm/dispatch.json'))[$I]
+              print(d['fingerprint'], d['canonical_path'], d['attempts'], ','.join(d['cwes']), d.get('shard') or '')")
+              echo "verify $I: fp=$FP path=$CPATH attempts=$ATT cwes=$CWES shard=$SHARD"
+
+              # INVARIANT 5, as a trap rather than as a comment. The exporter used to
+              # be straight-line code at the bottom, so it ran only if the script got
+              # there -- and on 2026-08-25 three sibling pods were SIGTERM'd three
+              # minutes into a 40-minute verify and published NOTHING. A terminated
+              # pod still knows which fingerprint it was given, and "we started and
+              # were killed" is a different fact from silence.
+              SHA=__SHA__
+              VERDICT=terminated; TRIED=0; EXPLOIT=0; RESTORED=0; POC_URI=""; FID=""; PUBLISHED=""
+              CWE_CLASS=""; HARNESS="functional-exploit"; NEEDS_ORACLE=0
+              ORACLE_RAN=0; ORACLE_POC=""
+              publish() {
+                # Re-publish when the verdict has CHANGED since last time. The guard
+                # used to be "publish once, first wins", which is exactly wrong when
+                # the first publish came from a trap that fired early: the pod then
+                # reports its pre-loop default forever and silently discards the real
+                # answer it went on to compute. Same object name either way, so a
+                # second write costs one PUT and overwrites in place.
+                [ "$PUBLISHED" = "$VERDICT" ] && return 0
+                PUBLISHED="$VERDICT"
+                { echo "{\"idx\":$I,\"fingerprint\":\"$FP\",\"finding_id\":\"${FID:-}\",\"canonical_path\":\"$CPATH\",\"verdict\":\"$VERDICT\",\"attempts_tried\":$TRIED,\"attempts_budget\":$ATT,\"exploit_successful\":$EXPLOIT,\"restored\":$RESTORED,\"shard\":\"$SHARD\",\"poc_uri\":\"$POC_URI\",\"proven_sha\":\"$SHA\",\"cwe_class\":\"${CWE_CLASS:-}\",\"harness\":\"${HARNESS:-functional-exploit}\",\"oracle_required\":${NEEDS_ORACLE:-0}}"; } > /tmp/result.json
+                cat /tmp/result.json
+                # a fresh token: verify runs long enough for the first one to age out
+                TOK=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+                SAFE=$(echo "$FP" | tr ':/' '__')
+                curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                  --data-binary @/tmp/result.json \
+                  "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&name=verify/__SHA__/$SAFE.json" \
+                  -o /dev/null -w "verify $I published ($VERDICT) http=%{http_code}\n"
+              }
+              trap publish EXIT TERM INT
+
+              # REAP, WITHOUT SHOOTING OURSELVES. `pkill -f PATTERN` matches the FULL
+              # COMMAND LINE, and this pod's PID 1 is `/bin/bash -c <this whole
+              # script>` -- which literally contains the strings "app.listen",
+              # "server_runner" and ".exploit/". So a bare `pkill -f app.listen`
+              # SIGTERMs the script itself.
+              #
+              # That was survivable while the only reap was the last thing before
+              # `exit 0`: the trap fired, published the verdict that was already
+              # final, and the script was ending anyway. Moving a reap INSIDE the
+              # loop turned it fatal -- the trap published `not_found` before the
+              # classifier had run, PUBLISHED=1 made the real verdict a no-op, and a
+              # VERIFIED finding with a working exploit was recorded as not_found.
+              # Measured 2026-08-25, idx1.
+              # ANCHOR the pattern to the start of the command line. Only a process
+              # whose cmdline BEGINS with (a path to) `node` matches; this pod's PID 1
+              # begins with `/bin/bash`, so the script cannot match itself no matter
+              # what strings it contains. Safe by construction, not by exclusion.
+              #
+              # The first fix here tried exclusion -- unanchored `pgrep -f` plus "skip
+              # $$ and PID 1" -- and was still wrong: an unanchored cmdline pattern
+              # matches the shell AND its ancestors AND its subshells, which all share
+              # that cmdline in /proc. Tested in isolation it matched four PIDs and
+              # killed the ones it did not know to skip. Enumerating what not to kill
+              # is a losing game; not being matchable is not.
+              #
+              # The second attempt was `pgrep -x node`, matching the process NAME.
+              # It matched nothing at all: node renames its main thread, so /proc
+              # comm reads `MainThread`, and a reap that silently reaps nothing is
+              # the worst of the three. Caught only by watching a victim survive.
+              #
+              # Killing every surviving `node` is precise here: cm is a Go binary, so
+              # after cm verify returns, any node still alive is an orphan the exploit
+              # left behind -- which is exactly the thing that wedged a pod for 56
+              # minutes (D44).
+              reap() {
+                local pid
+                for pid in $(pgrep -f "^([^ ]*/)?node[ ]" 2>/dev/null || true); do
+                  [ "$pid" = "1" ] && continue
+                  kill -TERM "$pid" 2>/dev/null || true
+                done
+              }
+
+              # PREFLIGHT. The image and these manifests drift: cm-runner:0.4.1 was
+              # built three hours before poc-normalise.py was added to the Dockerfile,
+              # so the pod cloned, restored and ran for three minutes before dying on
+              # a missing file. Check what we need FIRST, and fail as setup_failed --
+              # invariant 6: a pod that could not boot must never be recorded as
+              # evidence about a vulnerability.
+              for t in /opt/cm/scrub-answer-key.py /opt/cm/poc-normalise.py /opt/cm/oracle-run.py /opt/cm/canary/exploit.sh; do
+                if [ ! -f "$t" ]; then
+                  echo "FATAL: $t missing from the runner image — rebuild it"
+                  VERDICT=setup_failed; publish; exit 1
+                fi
+              done
+              # THE CANARY (D45). Files existing is not the same as this pod being
+              # able to DO anything. A run once came back Complete 6/6 having verified
+              # nothing -- every part behaved correctly and only the aggregate was
+              # meaningless -- and nothing in the system treats that as abnormal.
+              #
+              # This replays a known exploit against a known-vulnerable fixture and
+              # requires it to fire. It does NOT invoke cm: verify is ~50% on a
+              # confirmed bug, so an agent-based control would false-alarm about half
+              # the time and be muted within a week. What it proves is the plumbing --
+              # this pod can run attacker-controlled code and correctly observe the
+              # result -- which is exactly what was silently missing.
+              #
+              # Costs ~1s and runs before the clone, so a broken pod stops here rather
+              # than 40 minutes in. Failure is setup_failed, never a negative about
+              # the finding: invariant 6.
+              if ! CANARY_OUT=$(bash /opt/cm/canary/exploit.sh 2>&1); then
+                echo "FATAL: canary did not fire — this pod cannot verify anything"
+                echo "$CANARY_OUT"
+                VERDICT=setup_failed; publish; exit 1
+              fi
+              echo "canary: $CANARY_OUT"
+              TOK=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+              # Clone to the SAME path the find shard used, so the absolute file_paths
+              # inside its state.db resolve here without rewriting.
+              CDIR=/work/c${SHARD:-$I}
+              URL="__REPOURL__"
+              [ -n "${GH_TOKEN:-}" ] && URL="${URL/https:\/\//https://x-access-token:${GH_TOKEN}@}"
+              # Same pin as find. An exploit proven against the wrong tree is worse
+              # than no exploit: it is a PoC stamped with a sha it never ran on.
+              mkdir -p $CDIR && git -C $CDIR init -q && git -C $CDIR remote add origin "$URL"
+              git -C $CDIR fetch -q --depth 1 origin __SHA__ && git -C $CDIR checkout -q FETCH_HEAD || { echo "FATAL: cannot pin __SHA__"; exit 1; }
+              [ "$(git -C $CDIR rev-parse HEAD)" = "__SHA__" ] || { echo "FATAL: sha mismatch"; exit 1; }
+              find $CDIR -name .cm_project -delete
+              # A scrub crash is a setup failure, never evidence about the finding
+              # (invariant 6) — and never a silent proceed on an unscrubbed tree.
+              python3 /opt/cm/scrub-answer-key.py $CDIR __SCRUB__ --report $HOME/scrub-$I.json \
+                || { echo "FATAL: scrub failed"; VERDICT=setup_failed; publish; exit 1; }
+              cd $CDIR && ([ -d native ] && (cd native && make) || true)
+              lookup_fid() { python3 -c "
+              import sqlite3,os,sys
+              db=os.environ['HOME']+'/.codemender/state.db'
+              if not os.path.exists(db): print(''); sys.exit()
+              try: c=sqlite3.connect('file:'+db+'?mode=ro',uri=True)
+              except Exception: print(''); sys.exit()
+              cwes='$CWES'.split(',')
+              ph=','.join('?'*len(cwes))
+              try:
+                  r=c.execute('select finding_id from findings where file_path like ? and vuln_id in ('+ph+') limit 1',
+                              ['%/$CPATH']+cwes).fetchone()
+              except Exception: r=None
+              print(r[0] if r else '')" 2>/dev/null; }
+              # NOTE: `cm find __SCOPE__` records file_path RELATIVE to the scan target and
+              # stores that target in the sessions row (e.g. /work/c0/src). The restore
+              # below only resolves because this pod clones to the SAME path the find
+              # shard used -- that is what CDIR=/work/c${SHARD} buys. Any restore into a
+              # different layout must rebase sessions.project_root first, or every path
+              # resolves to nothing and cm exits on "resetting workspace: no such file".
+              # RESTORE the find shard's state.db rather than re-running find. Re-discovery
+              # is a SECOND independent roll of a ~30%-variable detector: measured, it lost
+              # 33% of verify pods to not_found (0 attempts, full pod cost, no verdict).
+              RESTORED=0
+              if [ -n "$SHARD" ]; then
+                curl -s -H "Authorization: Bearer $TOK" \
+                  "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/find%2F__SHA__%2F$SHARD.db?alt=media" \
+                  -o $HOME/.codemender/state.db -w "restore shard=$SHARD http=%{http_code}\n"
+                FID=$(lookup_fid); [ -n "$FID" ] && RESTORED=1
+              fi
+              # fallback: no shard, download failed, or the restored db has no such finding
+              if [ -z "${FID:-}" ]; then
+                echo "restore unusable -> falling back to local re-discovery"
+                rm -f $HOME/.codemender/state.db
+                cm find . --sandbox=false -y --bypass-warning > /tmp/f 2>&1 || true
+                FID=$(lookup_fid)
+              fi
+              echo "finding_id=$FID (restored=$RESTORED)"
+              # THE FIND/VERIFY PATH CONTRACT, asserted instead of assumed.
+              # `cm find __SCOPE__` records findings.file_path RELATIVE TO THE SCAN
+              # TARGET, and stores that target in sessions.project_root. `cm verify`
+              # resolves file_path against the CWD. So if verify runs from the repo
+              # root while find scanned a subtree, every path is short by exactly that
+              # subtree and cm dies on "resetting workspace: no such file".
+              # Measured 2026-08-25: 6/6 pods, Job GREEN, every verdict setup_failed,
+              # zero verification performed. The clone path matching was necessary and
+              # not sufficient -- the SUBTREE has to match too.
+              # The state.db knows where find scanned. Ask it; never re-derive it.
+              PROOT=$(python3 -c "
+              import sqlite3,os
+              db=os.environ['HOME']+'/.codemender/state.db'
+              try:
+                  c=sqlite3.connect('file:'+db+'?mode=ro',uri=True)
+                  r=c.execute('select project_root from sessions order by created_at desc limit 1').fetchone()
+                  print(r[0] if r and r[0] else '')
+              except Exception: print('')" 2>/dev/null)
+              VDIR="${PROOT:-$CDIR/__SCOPE__}"
+              if [ ! -d "$VDIR" ]; then
+                echo "FATAL: scan target '$VDIR' (project_root='$PROOT') is not in this checkout"
+                VERDICT=setup_failed; publish; exit 1
+              fi
+              cd "$VDIR" || { echo "FATAL: cannot cd $VDIR"; VERDICT=setup_failed; publish; exit 1; }
+              echo "verify cwd=$VDIR (find's project_root; CDIR=$CDIR)"
+              # ROUTE THE FINDING TO A HARNESS THAT CAN ACTUALLY PROVE IT.
+              # gate.py has known this routing since it was written and nothing
+              # consumed it -- and four of its five oracle classes were unreachable
+              # anyway, because the CWE->class map produced names the routing table
+              # did not use. Both are fixed; this is the consumer.
+              #
+              # For a class whose honest proof is a non-functional oracle (ReDoS ->
+              # wall-clock, GC leak -> RSS growth, timing -> statistical separation,
+              # weak PRNG -> next-token prediction, memory -> ASAN), a scripted
+              # functional exploit is the WRONG INSTRUMENT. Its failure is not
+              # evidence of absence, and retrying it is paying repeatedly for the
+              # same wrong answer. Measured: a ReDoS finding burned 3 of 5 attempts
+              # before a functional exploit happened to land.
+              ROUTE=$(python3 /opt/cm/oracle-route.py --cwes "$CWES" 2>/dev/null || echo '{}')
+              NEEDS_ORACLE=$(echo "$ROUTE" | python3 -c "import json,sys;print('1' if json.load(sys.stdin).get('needs_oracle') else '0')" 2>/dev/null || echo 0)
+              CWE_CLASS=$(echo "$ROUTE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('cwe_class',''))" 2>/dev/null || echo "")
+              HARNESS=$(echo "$ROUTE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('harness',''))" 2>/dev/null || echo "")
+              if [ "$NEEDS_ORACLE" = "1" ]; then
+                echo "route: $CWE_CLASS needs $HARNESS — a functional exploit is the wrong instrument"
+                # One attempt, not $ATT. Retrying a harness that structurally cannot
+                # succeed is not resilience.
+                ATT=1
+              else
+                echo "route: $CWE_CLASS -> functional-exploit"
+              fi
+              VERDICT=not_found; EXPLOIT=0; TRIED=0
+              # RUN THE ORACLE, IF THIS TARGET HAS A SPEC FOR THIS FINDING (D50).
+              #
+              # Routing alone fixed the COST and the CACHE -- it stopped a wrong
+              # instrument burning five attempts and stopped its failure caching as
+              # "not exploitable". It did not make anything provable. This does: the
+              # spec supplies the endpoint and payloads the oracle needs, which is
+              # the only thing that was ever missing.
+              #
+              # Note it runs whether or not CM resolved a finding id. The oracle is an
+              # INDEPENDENT instrument -- it drives the app over HTTP and measures --
+              # so a finding CM could not re-locate in its own state is still provable
+              # here, and `not_found` stops being the end of the road for these
+              # classes.
+              #
+              # No spec entry -> `unproven`, and we fall through to the D47 path
+              # below. Never a negative: an untested finding must not cache as one.
+              #
+              # THE SPEC IS CONSULTED FOR EVERY FINDING, NOT ONLY ROUTED ONES (D51).
+              # This used to be gated on $NEEDS_ORACLE, which is computed from CM's
+              # CWE class -- the one field D17 measured as UNSTABLE and deliberately
+              # excluded from identity. Spec entries are keyed on fp3, which is
+              # stable. A stable key behind an unstable gate is not a gate, it is a
+              # coin flip: CM labelled a buffer-retention leak `prototype-pollution`,
+              # the router therefore called it functional, the fp3 entry that proves
+              # it at 314 MB of growth was never read, and the finding sat `unproven`
+              # with the instrument one lookup away.
+              #
+              # Consulting always is nearly free: with no matching entry oracle-run
+              # returns `unproven` before it boots anything.
+              # Specs are keyed by repo NAME, and a participant's fork is not named
+              # after the upstream target -- the runbook creates `cm-lab`, and the
+              # workflow passes github.event.repository.name. Keyed on that alone the
+              # file never exists, the whole oracle block is skipped SILENTLY, and
+              # every oracle-class finding quietly falls through to `cm verify` while
+              # the router's guessed harness is still recorded. Try the repo name,
+              # then an explicit override, then the upstream target the lab clones.
+              ORACLE_SPEC="/opt/cm/oracle-specs/$(basename '__REPO__').yaml"
+              [ -f "$ORACLE_SPEC" ] || [ -z "${CM_ORACLE_SPEC:-}" ] || ORACLE_SPEC="$CM_ORACLE_SPEC"
+              [ -f "$ORACLE_SPEC" ] || ORACLE_SPEC=/opt/cm/oracle-specs/vulnerable-app.yaml
+              ORACLE_RAN=0
+              if [ ! -f "$ORACLE_SPEC" ]; then
+                # loud, because silence here is indistinguishable from "oracle ran
+                # and found nothing" in every artefact this pod publishes
+                echo "oracle: NO SPEC for repo '__REPO__' (tried repo name, CM_ORACLE_SPEC, vulnerable-app)"
+                echo "oracle: oracle-class findings will fall through to cm verify"
+              fi
+              if [ -f "$ORACLE_SPEC" ]; then
+                EFUNC=$(python3 -c "import json;d=json.load(open('/etc/cm/dispatch.json'))[$I];print(d.get('enclosing_function') or '')" 2>/dev/null || echo "")
+                OJSON=/tmp/oracle-$I.json; OBANK=$(mktemp -d)
+                echo "oracle: $HARNESS on ${CPATH}::${EFUNC} via $(basename "$ORACLE_SPEC")"
+                # --project-root is the APP root (oracle-run.py uses it only as the
+                # cwd for the spec's `install` and `boot`), which is the checkout
+                # root -- NOT $VDIR, the scan scope. With SCOPE=src, $VDIR is
+                # /work/cN/src and the spec's `node src/server.js` resolved to
+                # src/src/server.js: MODULE_NOT_FOUND, recorded setup_failed. That
+                # killed EVERY oracle-routed class (redos/timing/weak-random/leak)
+                # on the documented CI configuration.
+                python3 /opt/cm/oracle-run.py --fp3 "${CPATH}::${EFUNC}" \
+                  --cwe-class "$CWE_CLASS" --spec "$ORACLE_SPEC" \
+                  --project-root "$CDIR" --out "$OJSON" --bank "$OBANK" \
+                  --log /tmp/oracle-app-$I.log > /tmp/oracle-stdout-$I 2>&1 || true
+                OV=$(python3 -c "import json;print(json.load(open('$OJSON')).get('verdict',''))" 2>/dev/null || echo "")
+                echo "oracle verdict: ${OV:-<none>}"
+                tail -5 /tmp/oracle-stdout-$I 2>/dev/null || true
+                if [ -n "$OV" ] && [ "$OV" != "unproven" ]; then
+                  # A capable instrument ran and reached an answer. Take it, and do
+                  # NOT also run cm verify: two instruments, two verdicts, and the
+                  # fold would have to pick -- which is a decision nobody made.
+                  VERDICT="$OV"; ORACLE_RAN=1; TRIED=1
+                  # The harness recorded must be the one that RAN. The router's guess
+                  # is what this fix exists to stop trusting.
+                  HARNESS=$(python3 -c "import json;print(json.load(open('$OJSON')).get('oracle') or '')" 2>/dev/null || echo "$HARNESS")
+                  CWE_CLASS_ROUTED="$CWE_CLASS"
+                  [ "$VERDICT" = "verified" ] && EXPLOIT=1
+                  if [ "$VERDICT" = "verified" ] && [ -n "$(ls -A $OBANK 2>/dev/null)" ]; then
+                    ORACLE_POC="$OBANK"
+                  fi
+                else
+                  echo "oracle: no spec entry for this finding -- falling through (stays unproven, never a negative)"
+                fi
+              fi
+              if [ -n "$FID" ] && [ "$ORACLE_RAN" = "0" ]; then
+                for a in $(seq 1 "$ATT"); do
+                  TRIED=$a
+                  # CM emits bash syntax into exploit.sh but the runner may exec it with
+                  # /bin/sh. On a dash-based image that is an instant, silent EXPLOIT_FAILED.
+                  ln -sf /bin/bash /usr/local/bin/sh 2>/dev/null || true
+                  # BOUND THE ATTEMPT. Unbounded, a wedged agent holds 1 CPU + 2Gi
+                  # under gVisor forever and nothing reclaims it. Note this is a
+                  # per-POD bound on purpose: Job-level activeDeadlineSeconds would
+                  # terminate every sibling when one index overran, which is exactly
+                  # the whole-Job budget D37 removed.
+                  # It also makes a verdict reachable that the ledger has always
+                  # ranked and the runner could never emit: VERDICT_RANK has
+                  # timeout=1, D6 calls timeout verdicts the negative-cache data, and
+                  # with no timeout the state was unreachable in practice.
+                  timeout -k 60 "${VERIFY_TIMEOUT:-2700}" cm verify "$FID" --sandbox=false -y --bypass-warning > /tmp/v 2>&1; VRC=$?
+                  # REAP THE AGENT'S ORPHANS, between attempts and not only at the end.
+                  # Measured 2026-08-25: an exploit booted the app, printed EXPLOIT
+                  # SUCCESSFUL at 03:05:31 -- and left `node server.js` running. cm
+                  # verify never exited, so the pod sat VERIFIED-but-unpublished for
+                  # 56 more minutes, and the cleanup below never ran because it is
+                  # AFTER the loop that was stuck. Killing the orphan by hand let the
+                  # pod finish and publish `verified` normally.
+                  # A stale listener also poisons the NEXT attempt: it answers on the
+                  # port the fresh exploit expects, so the attempt tests a process
+                  # from the previous run instead of this one.
+                  reap
+                  ST=$(python3 -c "
+              import sqlite3,os
+              c=sqlite3.connect('file:'+os.environ['HOME']+'/.codemender/state.db?mode=ro',uri=True)
+              r=c.execute(\"select status from findings where finding_id='$FID'\").fetchone()
+              print(r[0] if r else 'NONE')" 2>/dev/null)
+                  if grep -q 'EXPLOIT SUCCESSFUL' /tmp/v 2>/dev/null || [ "$ST" = "VERIFIED" ]; then
+                    VERDICT=verified; EXPLOIT=1; break
+                  fi
+                  # 124 is `timeout`'s own exit code. Classify it BEFORE the greps:
+                  # a killed run leaves partial output that reads as an ordinary
+                  # failure, and "we ran out of clock" must never fold as
+                  # exploit_failed -- that is a cached negative for a bug nobody
+                  # finished checking.
+                  if [ "$VRC" = "124" ]; then
+                    VERDICT=timeout
+                    echo "attempt $a hit the ${VERIFY_TIMEOUT:-2700}s budget"
+                    continue
+                  fi
+                  # CM ran to completion but declined to answer. That is NOT a negative
+                  # about exploitability -- measured on a large real-world codebase, a
+                  # 130-step run returned this. Recording it as exploit_failed poisons the cache.
+                  if grep -qiE 'no results were returned|status unchanged' /tmp/v 2>/dev/null; then
+                    VERDICT=unproven
+                  # invariant 6: a PoC that could not boot, build, or even PARSE is
+                  # SETUP_FAILED, not a negative. The shell-error patterns are not
+                  # hypothetical: a real run died on `set -o pipefail` under dash and
+                  # CM recorded it as EXPLOIT_FAILED. A bashism is a harness defect,
+                  # and a harness defect must never read as "not exploitable".
+                  elif grep -qiE 'cannot (build|boot|start)|setup failed|dependency|ENOENT|module not found|illegal option|command not found|syntax error|: not found|permission denied|no such file|EADDRINUSE|ECONNREFUSED|MongoServerError|exploit execution failed: exit status (1|2|126|127)' /tmp/v 2>/dev/null; then
+                    VERDICT=setup_failed
+                  else
+                    VERDICT=exploit_failed
+                  fi
+                  # Do not throw away the evidence the verdict was based on. cm output
+                  # goes to /tmp/v, which dies with the pod -- so diagnosing the path
+                  # bug above needed a debug pod to reproduce something the classifier
+                  # had already read and discarded. A verdict that is not `verified` is
+                  # exactly the case someone will need to explain later.
+                  if [ "$VERDICT" != "verified" ]; then
+                    echo "--- cm output (attempt $a/$ATT, verdict=$VERDICT, rc=$VRC) ---"
+                    tail -15 /tmp/v 2>/dev/null || true
+                    echo "--- end cm output ---"
+                  fi
+                done
+              fi
+              # THE WRONG INSTRUMENT FINDING NOTHING IS NOT EVIDENCE OF ABSENCE.
+              # exploit_failed is folded as a NEGATIVE and cached against the
+              # finding's version key. For an oracle class that negative was never
+              # earned: the harness did not fail, it was never capable. Downgrade to
+              # unproven so the finding stays in the queue for a run that can prove
+              # it, instead of reading as "checked, not exploitable".
+              #
+              # This is invariant 6 one level up. Invariant 6 says a PoC that could
+              # not BOOT is setup_failed; this says a PoC that could not POSSIBLY
+              # succeed is not a negative either.
+              #
+              # ORACLE_RAN=1 EXEMPTS THIS. If the oracle itself ran, `exploit_failed`
+              # came from the RIGHT instrument with its own negative control passing,
+              # and downgrading it would throw away the real negative this subsystem
+              # was built to make reachable (D50). The downgrade applies only when the
+              # thing that failed was a functional exploit standing in for an oracle.
+              if [ "$NEEDS_ORACLE" = "1" ] && [ "$ORACLE_RAN" = "0" ] && [ "$VERDICT" = "exploit_failed" ]; then
+                echo "verdict: exploit_failed -> unproven ($CWE_CLASS needs $HARNESS, and no spec entry supplied its parameters)"
+                VERDICT=unproven
+              fi
+
+              # ---- PoC CAPTURE (invariant: the exploit IS the durable capital) ----
+              # A verified run that discards its exploit has paid 20-40 min for a
+              # one-shot answer. Publish it content-addressed by fingerprint, stamped
+              # with the sha it was proven against -- the positive control replays
+              # against exactly that commit (invariant 7).
+              POC_URI=""
+              if [ "$VERDICT" = "verified" ]; then
+                POCDIR=$(mktemp -d)
+                # An oracle-verified finding's PoC is the instrument plus its
+                # parameters, already written by oracle-run.py --bank. It is a
+                # regression test in exactly the same sense: replay.sh boots the
+                # candidate tree from the spec and exits 0 only if the oracle fires.
+                if [ -n "${ORACLE_POC:-}" ]; then
+                  cp "$ORACLE_POC"/* $POCDIR/ 2>/dev/null || true
+                fi
+                # cm writes exploits into the tree; take whatever it produced
+                find $CDIR -path '*/.exploit/*' -type f -print0 2>/dev/null                   | xargs -0 -I{} cp {} $POCDIR/ 2>/dev/null || true
+                find $CDIR -maxdepth 2 -name '*exploit*.sh' -type f -print0 2>/dev/null                   | xargs -0 -I{} cp {} $POCDIR/ 2>/dev/null || true
+                if [ -n "$(ls -A $POCDIR 2>/dev/null)" ]; then
+                  # NORMALISE BEFORE BANKING. CM writes exploits that work where they
+                  # were born and nowhere else: server_runner.js requires
+                  # $CDIR/src/app.js by absolute path, so replayed against any other
+                  # checkout it still boots THAT tree and a fully fixed candidate
+                  # reports EXPLOIT SUCCESSFUL. Measured: 0 of 4 banked PoCs were
+                  # relocatable, and the positive control cannot detect it because
+                  # both replays boot the same pinned tree and agree.
+                  # A PoC that will not normalise is NOT banked -- an unusable
+                  # regression test is worse than none, it is a green light.
+                  if ! python3 /opt/cm/poc-normalise.py $POCDIR --tree $CDIR; then
+                    echo "WARNING: PoC is not relocatable — refusing to bank it"
+                    POC_URI="REFUSED_NOT_RELOCATABLE"
+                  else
+                  tar -czf /tmp/poc.tgz -C $POCDIR .
+                  SAFEFP=$(echo "$FP" | tr ':/' '__')
+                  # ifGenerationMatch=0 means "create only if absent". It is what
+                  # makes the failure modes distinguishable: the runner holds
+                  # objectCreator and NOT objectOwner, so a plain overwrite of an
+                  # already-banked PoC returns 403 -- the same code as a genuine
+                  # permission failure. With the precondition, "already banked at
+                  # this sha" is 412 and nothing else is.
+                  #
+                  # The URI used to be assigned unconditionally, one line below the
+                  # upload, ignoring its status entirely. On 2026-08-29 a verify pod
+                  # logged `poc published http=403` and still wrote a poc_uri into
+                  # the verdict. Nothing downstream re-checks it: gate-check and
+                  # ingest-verdicts both print `poc=MISSING` only when the field is
+                  # EMPTY, so a dangling URI reads as a banked PoC. That is
+                  # invariant 7 failing silently -- the positive control cannot
+                  # replay an object that was never stored, and the corpus reports
+                  # itself fuller than it is.
+                  PCODE=$(curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/gzip' \
+                    --data-binary @/tmp/poc.tgz \
+                    "https://storage.googleapis.com/upload/storage/v1/b/__POCBUCKET__/o?uploadType=media&ifGenerationMatch=0&name=poc/$SAFEFP/$SHA.tgz" \
+                    -o /dev/null -w '%{http_code}')
+                  echo "poc published http=$PCODE"
+                  case "$PCODE" in
+                    200|201) POC_URI="gs://__POCBUCKET__/poc/$SAFEFP/$SHA.tgz" ;;
+                    412)     echo "poc already banked for $SAFEFP at $SHA -- keeping URI"
+                             POC_URI="gs://__POCBUCKET__/poc/$SAFEFP/$SHA.tgz" ;;
+                    *)       echo "WARNING: PoC upload FAILED http=$PCODE -- not banking a URI that resolves to nothing"
+                             POC_URI="UPLOAD_FAILED_$PCODE" ;;
+                  esac
+                  fi
+                else
+                  echo "WARNING: verified but no exploit artifact found — PoC corpus not filled"
+                fi
+              fi
+              # PROCESS hygiene, not just file hygiene. Verify agents boot servers and
+              # do not always reap them: measured locally, four listeners outlived their
+              # runs (:3210 :3220 :3230 :3240) and a later PoC replay silently exercised
+              # one of them instead of the tree it was given -- a REGRESSION verdict
+              # about a commit that was never read.
+              #
+              # CORRECTED 2026-08-25: this used to say "the pod boundary hides this on
+              # cluster". It does not. An orphaned listener keeps `cm verify` alive,
+              # which keeps the POD alive -- one sat VERIFIED-but-unpublished for 56
+              # minutes -- and this cleanup never ran, because it is after the loop
+              # that was stuck. The pod boundary only collects the orphan once the pod
+              # ends, and the orphan is the reason it does not. Reaping now happens
+              # inside the loop as well; this sweep is the belt to that pair of braces.
+              reap
+              # .exploit/ hygiene: never let synthesized exploits reach a fix PR
+              find $CDIR -name '.exploit' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+              echo "RESULT idx=$I fp=$FP finding=$FID verdict=$VERDICT tried=$TRIED/$ATT exploit=$EXPLOIT poc=$POC_URI"
+              publish            # the trap would catch it anyway; do it while we still have time
+              exit 0
+          resources:
+            requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}
+            limits:   {cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi}

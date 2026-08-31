@@ -1,0 +1,17 @@
+rules:
+  - id: cm-harvested-os-command-injection-e974eaf7
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Shell command built from untrusted input \u2014 CM proved RCE. Use execFile with an args array; never a shell string."
+    patterns:
+      - pattern-either:
+          - pattern: "$CP.exec($A + $B, ...)"
+          - pattern: "$CP.execSync($A + $B, ...)"
+          - pattern: "$CP.exec(`...${$X}...`, ...)"
+    metadata:
+      cm_fingerprint: "fp3:e974eaf7c072453c"
+      cwe: "CWE-78"
+      source: "codemender-candidate"
+      poc: "n/a"
+      confidence: "HIGH"
+      note: "Auto-harvested from a CM verification. Review before gating; ships as advisory until confirmed."

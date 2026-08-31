@@ -1,0 +1,19 @@
+# R1: does cm run under gVisor, and does its OS-level sandbox nest?
+# Render before applying — __IMG__ is the digest you set as RUNNER_IMAGE in 0g:
+#   sed "s#__IMG__#$IMG#g; s#__PROJECT__#$PROJECT#g" k8s/10-probe-gvisor.yaml | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: cm-probe-gvisor, namespace: cm}
+spec:
+  runtimeClassName: gvisor
+  serviceAccountName: cm-lab-runner
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: __IMG__
+      command: ["/usr/local/bin/probe.sh"]
+      env:
+        - {name: GOOGLE_CLOUD_PROJECT, value: __PROJECT__}
+      resources:
+        requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi}
+        limits:   {cpu: "2", memory: 4Gi, ephemeral-storage: 2Gi}

@@ -1,0 +1,87 @@
+[
+  {
+    "name": "fingerprint",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "cwe_class",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "enclosing_function",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "canonical_path",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "severity",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "repo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "verdict",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "attempts",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "deferrals",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "fixed_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "agent_version",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "model_version",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "fp_algo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "poc_uri",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "first_seen",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "last_updated",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "snapshot_ts",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  }
+]

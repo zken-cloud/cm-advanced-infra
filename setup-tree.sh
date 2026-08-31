@@ -39,5 +39,5 @@ run git -C "$H/cm-lab" -c user.email="$U@cm-lab" -c user.name="$U" commit -q -m 
 # what Step 3's `cm vcs reset` will otherwise delete as untracked.
 run git -C "$H/cm-lab" push -q origin HEAD:main || echo "WARN: push failed; push ~/cm-lab before Step 4"
 
-ln -sfn "$GUIDE" "$H/cm-advanced-lab"; chown -h "$U" "$H/cm-advanced-lab"
+ln -sfn "$GUIDE" "$H/cm-lab-payload"; chown -h "$U" "$H/cm-lab-payload"
 echo "~/cm-lab ready for $U"

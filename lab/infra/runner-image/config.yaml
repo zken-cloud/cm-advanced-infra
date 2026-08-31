@@ -1,0 +1,47 @@
+# Baked CodeMender config — CM-SDLC lab runner image.
+# Schema for `sandbox:` / `security:` recovered empirically (LAB-DESIGN 2.7).
+server: {}
+team_id: "zken-cm-lab"
+scan:
+  extensions:
+    include: [".js", ".ts", ".jsx", ".tsx", ".py", ".java", ".go"]
+    exclude: [".min.js"]
+  max_file_size_kb: 500
+  incremental: false
+output:
+  format: json
+tools:
+  confirm_commands: false
+  confirm_writes: false
+vcs:
+  type: git
+build:
+  command: ""
+# R1 RESULT: CM's OS-level sandbox (exebox) cannot start on GKE Autopilot.
+#   gVisor node : fork/exec /usr/local/bin/cm: invalid argument   (EINVAL)
+#   runc  node  : fork/exec /usr/local/bin/cm: operation not permitted (EPERM)
+# Containment is therefore delegated to gVisor + the filesystem sandbox roots
+# (default-on) + command_policy.yaml. See EXPERIMENTS.md R1.
+# NOTE: `security.block_patterns` below is INERT -- measured: it parses cleanly and
+# then does not enforce (EXPERIMENTS.md, "But security.block_patterns did not take
+# effect"). The real control surface is command_policy.yaml. Kept here only so the
+# baked config matches what was tested; do not add controls here expecting them to
+# apply.
+sandbox:
+  enabled: false
+  profile: strict
+  network:
+    enabled: false          # deny agent-spawned commands outbound egress
+    block:
+      - "169.254.169.254"   # cloud metadata
+security:
+  block_patterns:
+    - "curl"
+    - "wget"
+    - "gcloud"
+    - "gsutil"
+    - "kubectl"
+  protected_files:
+    - "/work/app/.env"
+  exclude_dirs:
+    - "node_modules"

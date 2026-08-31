@@ -1,0 +1,160 @@
+# Phase-1 find Job (K-replicated). Each pod scans the full target clone
+# (replication = recall insurance), publishes its state.db before exit.
+# Shards are keyed by the COMMIT they scanned: find/<sha>/<i>.db. A fixed
+# find/<i>.db made every run overwrite the last one's evidence, gave two
+# concurrent fan-outs a silent last-writer-wins collision, and left nothing able
+# to say which commit a shard belonged to -- so nothing downstream could be
+# automated, because there was nothing to reconcile against.
+#
+# Target is any git URL: __REPOURL__/__REPO__/__SCRUB__ are substituted by
+# run-twophase.sh. A public target needs no token;
+# private ones (zken-cloud/vulnerable-app) pick up the optional gh-token Secret.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: cm-find, namespace: cm}
+spec:
+  completions: __SHARDS__
+  parallelism: __SHARDS__
+  completionMode: Indexed
+  # INVARIANT 5. A bare `backoffLimit` on an Indexed Job is a WHOLE-JOB retry
+  # budget: one shard failing twice spends it and Kubernetes terminates the healthy
+  # siblings, which silently deletes the K-replication the recall numbers rest on.
+  # Per-index budget instead, and let every index finish -- 52-verify-job.yaml has
+  # always done this; the find Job did not.
+  backoffLimitPerIndex: 1
+  maxFailedIndexes: __SHARDS__
+  backoffLimit: __SHARDS__
+  template:
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: cm-lab-runner
+      restartPolicy: Never
+      containers:
+        - name: find
+          image: __IMG__
+          env:
+            - {name: GOOGLE_CLOUD_PROJECT, value: __PROJECT__}
+            - {name: GH_TOKEN, valueFrom: {secretKeyRef: {name: gh-token, key: token, optional: true}}}
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              I=${JOB_COMPLETION_INDEX:-0}
+              export HOME=/home/cm/w$I; mkdir -p $HOME/.codemender
+              cp /etc/codemender/config.yaml $HOME/.codemender/config.yaml
+              cp /etc/codemender/command_policy.yaml $HOME/.codemender/command_policy.yaml
+
+              # INVARIANT 5, as a trap rather than as a comment. This used to be
+              # straight-line code after `cm find`, which publishes on the SUCCESS
+              # path only by position -- an OOM, a preemption or a deadline kill
+              # published NOTHING, and a silently missing shard is arithmetic on K,
+              # the independent variable the recall numbers rest on. CLAUDE.md names
+              # this exact pattern as satisfying the sentence and not the invariant
+              # (D37). Installed BEFORE the clone, so every later failure still
+              # publishes whatever exists.
+              PUBLISHED=0
+              # The version that ACTUALLY ran, read from the binary. This used to fall
+              # back to a hardcoded codemender-0.4.0, and measured on a clean project
+              # it stamped 0.4.0 onto coverage produced by 0.5.0 -- silently
+              # misattributing every record. Unresolvable resolves to -unknown, which
+              # gate_stale now treats as stale rather than as newer-than-everything.
+              CM_AGENT_VERSION="codemender-$(cm --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+              [ "$CM_AGENT_VERSION" = "codemender-" ] && CM_AGENT_VERSION="codemender-unknown"
+              echo "agent version: $CM_AGENT_VERSION"
+
+              publish() {
+                [ "$PUBLISHED" = "1" ] && return 0
+                PUBLISHED=1
+                # a fresh token: find runs long enough for the first one to age out
+                TOK=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])' 2>/dev/null)
+                if [ -z "${TOK:-}" ]; then echo "find $I: no metadata token — cannot publish"; return 0; fi
+                if [ -s "$HOME/.codemender/state.db" ]; then
+                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/octet-stream' \
+                    --data-binary @$HOME/.codemender/state.db \
+                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/$I.db" \
+                    -o /dev/null -w "find $I published http=%{http_code}\n"
+                else
+                  echo "find $I: no state.db to publish — this shard did NOT land"
+                fi
+                # CM's own output. Without this the only record of WHY a shard
+                # produced nothing dies with the container.
+                if [ -s /tmp/f ]; then
+                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: text/plain' \
+                    --data-binary @/tmp/f \
+                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/cm-$I.log" \
+                    -o /dev/null -w "cmlog $I published http=%{http_code}\n"
+                fi
+                if [ -s "$HOME/scrub-$I.json" ]; then
+                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                    --data-binary @$HOME/scrub-$I.json \
+                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/scrub-$I.json" \
+                    -o /dev/null -w "scrub $I published http=%{http_code}\n"
+                fi
+                # COVERAGE (Q13/D55). CM emits none -- `file_hashes` is empty after every
+                # completed scan measured -- so the exporter reconstructs which files were
+                # IN SCOPE from the tree and the agent's own filters, and records
+                # separately the few paths CM itself referenced. Coverage is about what
+                # was OFFERED, not what came back, so it is worth publishing even from a
+                # pod that is being killed: "0 findings over 24 in-scope files" is the
+                # sentence the whole table exists to make sayable.
+                if [ -d "/work/c$I/__SCOPE__" ]; then
+                  python3 /opt/cm/coverage.py /work/c$I/__SCOPE__ \
+                    --agent "$CM_AGENT_VERSION" --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    --state-db $HOME/.codemender/state.db \
+                    --repo "__REPO__" --sha "__SHA__" --scope "__SCOPE__" \
+                    --out /tmp/coverage-$I.json > /dev/null 2>&1 || echo "coverage: exporter failed (non-fatal)"
+                fi
+                if [ -s /tmp/coverage-$I.json ]; then
+                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                    --data-binary @/tmp/coverage-$I.json \
+                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/coverage-$I.json" \
+                    -o /dev/null -w "coverage $I published http=%{http_code}\n"
+                else
+                  echo "coverage $I: NOTHING PRODUCED — this sha will be indistinguishable from unscanned"
+                fi
+              }
+              trap publish EXIT TERM INT
+              # inject the token only if one exists; a public target clones anonymously
+              URL="__REPOURL__"
+              [ -n "${GH_TOKEN:-}" ] && URL="${URL/https:\/\//https://x-access-token:${GH_TOKEN}@}"
+              # PIN THE SHA. `git clone` with no ref takes the DEFAULT BRANCH, so a
+              # feature-branch push was scanned as main: the agent analysed one tree
+              # while the ledger recorded the findings against another sha. Measured --
+              # all 3 pods "agreed" on a vulnerability that had already been fixed on
+              # the branch under test. Fetch the exact commit, then VERIFY it, and die
+              # if it does not match: scanning the wrong tree must never be silent.
+              mkdir -p /work/c$I && git -C /work/c$I init -q
+              git -C /work/c$I remote add origin "$URL"
+              git -C /work/c$I fetch -q --depth 1 origin __SHA__ || { echo "FATAL: cannot fetch __SHA__"; exit 1; }
+              git -C /work/c$I checkout -q FETCH_HEAD || { echo "FATAL: cannot checkout __SHA__"; exit 1; }
+              GOT=$(git -C /work/c$I rev-parse HEAD)
+              [ "$GOT" = "__SHA__" ] || { echo "FATAL: wanted __SHA__ got $GOT"; exit 1; }
+              echo "scanning $GOT (pinned)"
+              find /work/c$I -name .cm_project -delete
+              # lab integrity: strip the target's own answer key (README + inline
+              # annotations) before the agent sees it, else recall is reading, not
+              # detection. Report is provenance for the recall number.
+              # A scrub crash must FAIL the shard, not proceed: `|| true` here meant
+              # a broken scrubber scanned an unscrubbed tree and the run still looked
+              # green. A missing shard turns into RACE at the gate — fail-closed.
+              python3 /opt/cm/scrub-answer-key.py /work/c$I __SCRUB__ --report $HOME/scrub-$I.json \
+                || { echo "FATAL: scrub failed — refusing to scan an unscrubbed tree"; exit 1; }
+              cd /work/c$I && ([ -d native ] && (cd native && make) || true)
+              # __SCOPE__ narrows the search to a subtree (e.g. src/). Scanning
+              # a 47k-LOC tree's tests and vendored code buys nothing and costs agent-minutes.
+              # `|| true` keeps a CM failure from killing the pod before the trap can
+              # publish -- but on its own it also DISCARDED the failure. Measured on a
+              # clean project: cm 403'd, /tmp/f died with the pod, and the log went
+              # straight from the scrub to `published http=200`. Three shards exited
+              # Completed having scanned nothing, and "CM found nothing" was
+              # indistinguishable from "CM never ran" -- the exact confusion this
+              # design exists to prevent. Capture the code, say it out loud, and let
+              # publish() ship the output.
+              CM_RC=0
+              cm find __SCOPE__ --sandbox=false -y --bypass-warning > /tmp/f 2>&1 || CM_RC=$?
+              echo "cm find exit=$CM_RC ($(wc -l < /tmp/f 2>/dev/null || echo 0) lines)"
+              [ "$CM_RC" != "0" ] && { echo "--- cm find failed, last 20 lines ---"; tail -20 /tmp/f; }
+              # publishing is the trap installed above -- it fires here on normal
+              # exit and equally on TERM/INT, which is the whole point (invariant 5).
+          resources:
+            requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 3Gi}
+            limits:   {cpu: "1", memory: 2Gi, ephemeral-storage: 3Gi}

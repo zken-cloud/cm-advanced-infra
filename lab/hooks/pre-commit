@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# CM lab — lane 1a. Semgrep on STAGED CONTENT ONLY, at commit time.
+#
+# THREE RULES, and they are not negotiable:
+#
+#   1. FAILS OPEN.  Every failure path -- semgrep missing, semgrep crashing, the
+#      time budget blown, a malformed rule file -- exits 0. A security tool that
+#      breaks `git commit` gets uninstalled by lunchtime, and then it protects
+#      nobody. This hook is ADVISORY.
+#   2. TIME-BOXED.  Hard cap (default 10s). Over budget, it is killed and the
+#      commit proceeds.
+#   3. ONLY A PROVEN EXPLOIT BLOCKS.  Harvested rules carry cm_fingerprint +
+#      cm_poc metadata -- they came from an exploit CM actually synthesized and
+#      ran. Those, and only those, can stop a commit, and even then --no-verify
+#      overrides. Generic SAST hits are printed and waved through.
+#
+# This hook is NOT the enforcement point. The non-bypassable gate is server-side
+# (.github/workflows/cm-gate.yml) and reads the ledger. Anything here is a
+# courtesy to the developer: fastest possible feedback, zero friction.
+set -uo pipefail
+
+BUDGET="${CM_HOOK_BUDGET:-10}"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+RULES="${CM_HOOK_RULES:-$ROOT/.cm/rules}"
+HINTS="$(git rev-parse --git-dir)/cm-hints.json"
+ok() { exit 0; }
+
+[ "${CM_HOOK_SKIP:-0}" = "1" ] && ok
+command -v semgrep >/dev/null 2>&1 || { echo "cm-hook: semgrep not installed — skipping (fail-open)"; ok; }
+
+# Staged, still-existing source files only. -z + mapfile survives spaces in paths.
+mapfile -d '' -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR -z -- \
+  '*.js' '*.jsx' '*.ts' '*.tsx' '*.py' '*.go' '*.java' '*.rb' '*.php' '*.c' '*.cc' '*.cpp' 2>/dev/null)
+[ ${#STAGED[@]} -eq 0 ] && ok
+
+# Scan the STAGED CONTENT, not the worktree. If you scan the worktree you are
+# scanning code the developer did not stage, and you will block a commit over a
+# line that is not in it.
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+FILES=()
+for f in "${STAGED[@]}"; do
+  [ -n "$f" ] || continue
+  mkdir -p "$TMP/$(dirname "$f")"
+  git show ":$f" > "$TMP/$f" 2>/dev/null && FILES+=("$TMP/$f")
+done
+[ ${#FILES[@]} -eq 0 ] && ok
+
+ARGS=(--metrics=off --quiet --json --disable-version-check --timeout 5)
+[ -d "$RULES" ] && ARGS+=(--config "$RULES")
+ARGS+=(--config p/javascript)
+
+OUT="$TMP/out.json"
+# Capture the status explicitly. Inside `if ! cmd; then`, $? is the status of the
+# negation, not of cmd -- so the 124 check silently never fired and a blown budget
+# reported itself as "semgrep failed".
+timeout "$BUDGET" semgrep scan "${ARGS[@]}" -o "$OUT" "${FILES[@]}" >/dev/null 2>"$TMP/err"
+RC=$?
+if [ $RC -ne 0 ]; then
+  if [ $RC -eq 124 ]; then
+    echo "cm-hook: over ${BUDGET}s budget — skipped (fail-open)"
+  else
+    echo "cm-hook: semgrep exited $RC — skipped (fail-open)"
+    [ -s "$TMP/err" ] && sed 's/^/cm-hook:   /' "$TMP/err" | head -3
+  fi
+  ok
+fi
+[ -s "$OUT" ] || ok
+
+python3 - "$OUT" "$TMP" "$HINTS" <<'PY'
+import json, sys, os
+out, tmp, hints = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    res = json.load(open(out)).get("results", [])
+except Exception:
+    sys.exit(0)                                    # unparseable -> fail open
+if not res:
+    sys.exit(0)
+
+def rel(p):  return os.path.relpath(p, tmp)
+
+# A finding blocks ONLY if its rule was harvested from a real, verified exploit.
+#
+# BOTH keys, not either. `cm_fingerprint` alone says "this rule refers to some
+# finding"; it does not say the finding was verified or that an exploit exists.
+# With `or`, adding one line of YAML by hand was enough to make a rule blocking --
+# which is exactly how a JuiceShop SQL-injection rule came to block commits in this
+# repo, on a console.log, while its own metadata said "ships as advisory until
+# confirmed". stamp-rules.py is the ONLY thing allowed to promote a rule, and it
+# requires the ledger to say `verified` AND carry a PoC; this is where that
+# requirement is actually enforced.
+proven, advisory = [], []
+for r in res:
+    md = (r.get("extra") or {}).get("metadata") or {}
+    (proven if md.get("cm_poc") and md.get("cm_fingerprint") else advisory).append((r, md))
+
+W, R, B, D = "\033[33m", "\033[31m", "\033[1m", "\033[0m"
+if advisory:
+    print(f"\n{W}cm-hook{D}  {len(advisory)} advisory finding(s) — {B}not blocking{D}")
+    for r, _ in advisory[:8]:
+        print(f"   {rel(r['path'])}:{r['start']['line']}  {r['check_id'].rsplit('.',1)[-1]}")
+    if len(advisory) > 8:
+        print(f"   … {len(advisory)-8} more")
+
+# Carry the hints with the ref update so the server-side scan starts warm
+# instead of rediscovering what the developer was already told.
+# This iterated `res` -- a list of DICTS -- as `for r, md in res`, which raises
+# every time and was swallowed by the bare `except`. The file was never written,
+# and nothing said so. The (r, md) pairs live in proven+advisory, built above.
+try:
+    json.dump([{"path": rel(r["path"]), "line": r["start"]["line"],
+                "rule": r["check_id"], "proven": bool(md.get("cm_poc"))}
+               for r, md in proven + advisory], open(hints, "w"))
+except Exception as e:
+    # still non-fatal -- the hook must fail open -- but say so rather than vanish
+    print(f"cm-hook: could not write hints ({e.__class__.__name__}); continuing")
+
+if proven:
+    print(f"\n{R}{B}cm-hook  COMMIT BLOCKED{D} — {len(proven)} pattern(s) with a PROVEN exploit")
+    for r, md in proven:
+        print(f"   {R}{rel(r['path'])}:{r['start']['line']}{D}  {r['check_id'].rsplit('.',1)[-1]}")
+        if md.get("cm_fingerprint"): print(f"      fingerprint: {md['cm_fingerprint']}")
+        if md.get("cm_poc"):         print(f"      exploit:     {md['cm_poc']}")
+    print(f"\n   These rules were harvested from exploits CodeMender actually ran.")
+    print(f"   Override with {B}git commit --no-verify{D} — the server-side gate still applies.\n")
+    sys.exit(1)
+sys.exit(0)
+PY

@@ -3,3 +3,11 @@ terraform.tfvars
 *.tfstate
 *.tfstate.*
 tfplan
+
+# build artefacts from the payload
+lab/**/__pycache__/
+lab/**/.pytest_cache/
+lab/**/.terraform/
+lab/**/*.tfstate*
+# the CodeMender CLI is copied in at build time by bootstrap.sh; never committed
+lab/infra/runner-image/cm

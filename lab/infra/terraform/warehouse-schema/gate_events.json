@@ -1,0 +1,42 @@
+[
+  {
+    "name": "repo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "sha",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "action",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "reason",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "run_id",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "ts",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "blocking_count",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "blocking",
+    "type": "STRING",
+    "mode": "REPEATED"
+  }
+]

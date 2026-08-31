@@ -65,9 +65,9 @@ variable "upstream_target" {
 }
 
 variable "guide_repo" {
-  description = "This guide, cloned onto the VM by the bootstrap. Private: the PAT is used."
+  description = "The lab payload, cloned onto the VM by the bootstrap. PUBLIC: no credentials."
   type        = string
-  default     = "https://github.com/zken-cloud/cm-advanced-lab.git"
+  default     = "https://github.com/zken-cloud/cm-advanced-infra.git"
 }
 
 variable "guide_ref" {

@@ -1,0 +1,136 @@
+name: cm-risk-accept
+
+# The audited sign-off path (P2 / D53).
+#
+# A verified, unfixed finding blocks the gate. This is the ONLY way past it, and it
+# is deliberately a pull request: GitHub already records who opened it, who approved
+# it, when, and what was argued. A bespoke "accept risk" button would produce a
+# worse record and one nobody trusts.
+#
+# Two jobs, because validating and recording are different acts with different
+# consequences:
+#
+#   validate  — on the PR. Writes nothing. Refuses an acceptance that would be a
+#               bypass: a finding that is not verified, no expiry, an expiry past the
+#               ceiling, a reason outside the enum, or self-approval.
+#   ingest    — on merge to trunk. Writes the ledger row. Invariant 3 says the
+#               ingester is the sole writer, so this runs with the ingest identity
+#               and the gate reads the result — the gate never reads the branch.
+#
+# Note what is NOT here: no way to accept a risk without a merged PR, and no way to
+# extend one without a new PR. An acceptance that could be edited in place would be
+# a record of the present, and the question this exists to answer is about the past.
+
+on:
+  pull_request:
+    paths: ['.cm/risk-accepted/**']
+  push:
+    # The lane the design calls `trunk`. In this lab that branch is named `main`,
+    # and the other workflows already key on `main` -- a workflow watching a branch
+    # that does not exist never fires and never says so, which is the quietest
+    # possible way for a sign-off to be validated on the PR and then never recorded.
+    branches: [main]
+    paths: ['.cm/risk-accepted/**']
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: cm-lab-gate@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Pull the ledger
+        run: |
+          gcloud storage cp gs://${{ vars.RESULTS_BUCKET }}/ledger/cm-ledger.db /tmp/cm-ledger.db
+
+      # The approver is not known until someone approves, so on an unapproved PR this
+      # checks everything EXCEPT self-approval, and says so. The self-approval check
+      # is enforced again at ingest, where the approver is a fact.
+      - name: Who has approved this PR
+        id: approver
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          A=$(gh pr view ${{ github.event.pull_request.number }} \
+                --repo ${{ github.repository }} \
+                --json reviews --jq '[.reviews[] | select(.state=="APPROVED") | .author.login] | last // ""')
+          echo "approver=$A" >> $GITHUB_OUTPUT
+          echo "approver so far: ${A:-<none yet>}"
+
+      - name: Validate the acceptance
+        run: |
+          pip install -q pyyaml
+          python3 pipeline/risk-accept.py .cm/risk-accepted/ --check \
+            --ledger /tmp/cm-ledger.db \
+            --now "$(date -u +%Y-%m-%d)" \
+            ${{ steps.approver.outputs.approver && format('--approved-by {0}', steps.approver.outputs.approver) || '' }}
+
+  ingest:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 2}
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          # The INGEST identity, not the gate's read-only one. Invariant 3.
+          service_account: cm-lab-ingester@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Record the acceptance in the ledger
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          pip install -q pyyaml
+
+          # IS THERE ANYTHING TO INGEST? The path filter fires on any change under
+          # .cm/risk-accepted/ -- including a README, or the example template, which
+          # is deliberately named *.yaml.template so it is NOT an acceptance. Demanding
+          # an approver for a push that ingests nothing fails CI for no reason, and a
+          # check that goes red for no reason is one people learn to ignore. Measured:
+          # this fired on the merge that first shipped the directory.
+          shopt -s nullglob
+          FILES=(.cm/risk-accepted/*.yaml .cm/risk-accepted/*.yml)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "no acceptance files under .cm/risk-accepted/ — nothing to ingest"
+            exit 0
+          fi
+          echo "acceptances to ingest: ${FILES[*]}"
+
+          # The merge commit names the PR; the PR names the approver. Both are facts
+          # now, so the self-approval check is authoritative here in a way it cannot
+          # be on an open PR.
+          PR=$(gh pr list --repo ${{ github.repository }} --state merged --limit 1 \
+                 --search "${{ github.sha }}" --json number,url,author,reviews \
+                 --jq '.[0]')
+          PR_URL=$(echo "$PR" | jq -r '.url')
+          APPROVER=$(echo "$PR" | jq -r '[.reviews[] | select(.state=="APPROVED") | .author.login] | last // ""')
+          if [ -z "$APPROVER" ]; then
+            echo "::error::merged with no recorded approval — an acceptance without an approver is not a sign-off"
+            exit 1
+          fi
+
+          # Under the generation-CAS wrapper, like every other ledger write. It
+          # re-pulls before each attempt, which is the correctness condition and not
+          # an optimisation: the acceptance must be written onto the ledger it is
+          # about to overwrite, not onto a snapshot someone has since replaced. A
+          # lost update here loses a signed decision.
+          #
+          # --ok-codes 0: unlike ingest-verdicts.py, whose exit code carries a gate
+          # verdict, a non-zero here means the acceptance was REFUSED, and a refused
+          # acceptance must never be pushed.
+          bash pipeline/ledger-sync.sh with \
+            "gs://${{ vars.RESULTS_BUCKET }}/ledger/cm-ledger.db" /tmp/cm-ledger.db \
+            --ok-codes 0 -- \
+            python3 pipeline/risk-accept.py .cm/risk-accepted/ --ingest \
+              --ledger /tmp/cm-ledger.db --repo "${{ github.event.repository.name }}" \
+              --pr-url "$PR_URL" --approved-by "$APPROVER" \
+              --now "$(date -u +%Y-%m-%d)"

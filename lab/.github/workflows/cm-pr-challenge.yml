@@ -1,0 +1,67 @@
+# CHALLENGE a fix PR with a second model. Opt-in, advisory, and deliberately not
+# part of the lab's default path.
+#
+# The lab keeps PR-as-HITL: a participant reads the fix and approves it. This adds
+# an OPTIONAL second opinion on the one question that replay cannot answer — does
+# the patch fix the defect, or only break the exploit that proved it (DECISIONS R5).
+#
+# workflow_dispatch ONLY, on purpose. `on: pull_request` would put a generated
+# review on every PR, and a review that always appears becomes wallpaper — worse
+# than nothing, because it reads as coverage while nobody looks at it.
+name: cm-pr-challenge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to challenge"
+        required: true
+      fingerprint:
+        description: "fp3 fingerprint of the finding this PR fixes (optional but much better)"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write   # comment only. NOT `checks: write` — this must never
+                         # become a status check, and not being able to write one
+                         # is a stronger guarantee than intending not to.
+
+jobs:
+  challenge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: cm-lab-gate@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com
+
+      # The GATE's identity, which is read-only on the ledger. The reviewer needs to
+      # know what was proven; it must not be able to change it. A reviewer that
+      # could write the ledger could clear the blocker it is reviewing — invariant 3
+      # stated for a different actor.
+      - name: Fetch the ledger (read-only)
+        run: |
+          gcloud storage cp \
+            "gs://${{ vars.RESULTS_BUCKET }}/ledger/cm-ledger.db" /tmp/cm-ledger.db \
+            || echo "no ledger — the review will judge the diff on its own terms"
+
+      - run: pip install --quiet anthropic
+
+      - name: Challenge the fix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$ANTHROPIC_API_KEY" || {
+            echo "::error::ANTHROPIC_API_KEY is not set. This workflow is opt-in;"
+            echo "::error::add the secret to enable it, or leave it off."
+            exit 1
+          }
+          python3 pipeline/pr-challenge.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ inputs.pr }}" \
+            --ledger /tmp/cm-ledger.db \
+            ${{ inputs.fingerprint && format('--fingerprint {0}', inputs.fingerprint) || '' }} \
+            --post

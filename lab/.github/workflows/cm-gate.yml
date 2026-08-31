@@ -1,0 +1,106 @@
+# The ONLY developer-facing gate. It is a database lookup, and it fails closed.
+#
+# PASS  (exit 0) scan on record for this sha AND no verified-and-unfixed finding
+# BLOCK (exit 1) a verified, unfixed finding is present
+# RACE  (exit 2) no scan, or a partial one -- routes to the race policy, NEVER a pass
+#
+# Mark this check Required in branch protection. It is what makes the programme
+# non-bypassable, and it is the only thing a developer waits for.
+name: cm-gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: cm-lab-gate@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com
+
+      # A missing ledger and an UNREADABLE one are different failures and must not
+      # be collapsed. `|| echo` hid a 403 -- the gate SA had no objectViewer -- and
+      # the run reported "nothing has ever been scanned", which is a lie about a
+      # permissions bug. RACE is fail-closed so nothing merged, but the operator was
+      # sent to look at the wrong thing entirely.
+      - name: Pull the ledger
+        run: |
+          pip install -q -r pipeline/requirements.txt
+          set +e
+          ERR=$(gcloud storage cp gs://${{ vars.RESULTS_BUCKET }}/ledger/cm-ledger.db ./cm-ledger.db 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            if echo "$ERR" | grep -qiE '403|permission|forbidden|denied'; then
+              echo "::error::gate cannot READ the ledger (permissions), which is not the same as"
+              echo "::error::there being no ledger. Grant cm-lab-gate roles/storage.objectViewer."
+              echo "$ERR"; exit 1
+            fi
+            echo "::notice::no ledger object yet — the gate will answer RACE, which is correct"
+          fi
+
+      - name: Answer the gate
+        id: gate
+        run: |
+          set +e
+          python3 pipeline/gate-check.py \
+            --ledger ./cm-ledger.db \
+            --repo ${{ github.event.repository.name }} \
+            --sha ${{ github.event.pull_request.head.sha }} \
+            --min-shards 3 \
+            --event-out ./gate-event.json \
+            --run-id "${{ github.run_id }}" \
+            --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "verdict=$?" >> $GITHUB_OUTPUT
+
+      # The programme's only record of its own effect on developers: BLOCK rate,
+      # RACE rate, how long a blocked sha stays blocked. It existed nowhere but
+      # these logs, which age out.
+      #
+      # `if: always()` because RACE and ERROR are the interesting rows and both
+      # come with a non-zero exit. `|| true` because telemetry must never be the
+      # reason a merge is decided differently.
+      #
+      # One new object per run, named by (sha, run id): two gate runs cannot
+      # collide, so there is nothing to serialise and no CAS. The gate holds
+      # objectCreator on this prefix ONLY -- it can create an event and still
+      # cannot read or rewrite the ledger, so invariant 3 is intact.
+      - name: Record the gate decision
+        if: always()
+        run: |
+          [ -f ./gate-event.json ] || exit 0
+          DT=$(date -u +%Y-%m-%d)
+          gcloud storage cp ./gate-event.json \
+            "gs://${{ vars.RESULTS_BUCKET }}/warehouse/gate-events/dt=$DT/${{ github.event.pull_request.head.sha }}-${{ github.run_id }}.json" \
+            || echo "::warning::gate decision not recorded (dashboards only; the gate verdict stands)"
+
+      # A RACE is not a pass. If the scan for this sha has not landed, the
+      # policy decision is explicit and visible -- it is never silently green.
+      - name: Enforce
+        run: |
+          case "${{ steps.gate.outputs.verdict }}" in
+            0) echo "::notice::GATE PASS";;
+            1) echo "::error::GATE BLOCK -- verified, unfixed finding(s) on this sha"; exit 1;;
+            2) echo "::error::GATE RACE -- no complete scan on record for this sha"; exit 1;;
+            *) echo "::error::gate errored -- failing closed"; exit 1;;
+          esac
+
+      - name: Publish the ledger report
+        if: always()
+        run: |
+          python3 pipeline/ledger-report.py ./cm-ledger.db -o ledger-report.html \
+            --title "CM ledger — PR #${{ github.event.number }}" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: cm-ledger-report, path: ledger-report.html }

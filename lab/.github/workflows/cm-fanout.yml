@@ -1,0 +1,120 @@
+# Step 4 — the dispatch half of the CI design (Step 6's gate is cm-gate.yml).
+#
+# THE POINT OF THIS FILE IS WHAT IT DOES NOT DO: it never waits for CodeMender.
+# A push dispatches the fan-out onto GKE and the job ends. The merge is gated
+# later, by a ledger lookup that takes seconds (see cm-gate.yml). If you ever find
+# yourself adding `kubectl wait` to the feature-branch path, stop -- that is the
+# CI-blocking integration this design exists to replace.
+name: cm-fanout
+
+on:
+  push:
+    branches: ['feature/**', 'main']
+
+permissions:
+  contents: read
+  id-token: write        # required for WIF; without it the OIDC exchange 403s
+
+env:
+  PROJECT: ${{ vars.GCP_PROJECT }}
+  REGION: us-central1
+  CLUSTER: cm-lab
+  NS: cm
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: cm-lab-runner@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with: { cluster_name: cm-lab, location: us-central1 }
+
+      # K-replicated find. K=3 is on evidence, not taste: measured recall is
+      # K=1 57.8%, K=3 72.7%, K=6 80.0% -- and on real code one K=1 run returned
+      # 0 findings where another on the same commit returned 3.
+      - name: Dispatch find fan-out
+        run: |
+          set -euo pipefail
+          SHA=${{ github.sha }}
+          JOB=cm-find-${SHA::7}
+          # __SHA__ pins the clone (D29). Leaving it unsubstituted is not a
+          # cosmetic bug: `git fetch origin __SHA__` fails, all three pods die, and
+          # this workflow still reports success because it deliberately never waits.
+          # Green CI, no scan, and the only symptom is a RACE at the gate later.
+          # __SCOPE__=src keeps the agent out of pipeline/ and harvest-fp-cases/,
+          # whose vuln_*.js files are deliberately vulnerable and are not the app.
+          # __SCRUB__ must name every doc that gives the answers away. That is
+          # BOTH copies of the harvested ruleset: .cm/rules/ (seeded by
+          # hooks/install.sh) and pipeline/harvested-rules/ (the source, copied
+          # into the lab repo by setup-tree). These are rules YOU harvested in Step 7
+          # from your own verified PoCs, so they name your findings.
+          # -- a bug-number-to-idiom map with a runnable pattern for each. SCOPE=src
+          # already keeps the agent out of both; this is the second control, because
+          # a scope change must not be able to silently invalidate a recall number.
+          sed "s#__IMG__#${{ vars.RUNNER_IMAGE }}#g; s#__BUCKET__#${{ vars.RESULTS_BUCKET }}#g; \
+               s#__SHARDS__#3#g; s#__REPOURL__#${{ github.server_url }}/${{ github.repository }}.git#g; \
+               s#__REPO__#${{ github.event.repository.name }}#g; \
+               s#__SHA__#$SHA#g; \
+               s#__PROJECT__#${{ vars.GCP_PROJECT }}#g; \
+               s#__SCRUB__#--doc README.md --doc APP-README.md --doc .cm/rules/*.yaml --doc pipeline/harvested-rules/*.yaml#g; \
+               s#__SCOPE__#src#g" \
+            k8s/51-find-job.yaml | sed "s#name: cm-find#name: $JOB#" > /tmp/job.yaml
+
+          # Fail LOUDLY on any placeholder the substitution missed. This whole class
+          # of bug is invisible at dispatch time and fatal at run time -- __SHA__ was
+          # added to the manifest with D29 and never added here, so every fan-out
+          # since has failed 90 seconds after a green tick.
+          if grep -o '__[A-Z]*__' /tmp/job.yaml | sort -u | grep .; then
+            echo "::error::unsubstituted placeholder(s) above — refusing to dispatch a job that cannot run"
+            exit 1
+          fi
+          kubectl -n $NS apply -f /tmp/job.yaml
+
+          # The run manifest. The reconciler reads this, not the object names --
+          # it is the only thing that can say `shards_expected`, and without it
+          # "2 of 3 landed" and "2 of 2 landed" are the same listing. That
+          # distinction is the entire purpose of the scans table (D22).
+          #
+          # Written AFTER apply: a manifest for a Job that failed to start would
+          # have the reconciler waiting forever on shards that are not coming.
+          cat > /tmp/RUN.json <<JSON
+          {"sha":"$SHA","repo":"${{ github.event.repository.name }}",
+           "repourl":"${{ github.server_url }}/${{ github.repository }}.git",
+           "shards":3,"scope":"src","tier":"critical,high","top_n":20,
+           "max_parallelism":20,
+           "project":"${{ vars.GCP_PROJECT }}",
+           "image":"${{ vars.RUNNER_IMAGE }}",
+           "poc_bucket":"${{ vars.POC_BUCKET }}",
+           "scrub":"--doc README.md --doc APP-README.md --doc .cm/rules/*.yaml --doc pipeline/harvested-rules/*.yaml",
+           "dispatched_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+          JSON
+          # A direct media upload, NOT `gcloud storage cp`. cp issues a GET as part of
+          # its upload path, and the runner holds storage.objectCreator -- create,
+          # never read -- so cp 403s on storage.objects.get even though the write it
+          # is trying to do is permitted. Measured on a clean project: the Job was
+          # created and this line failed, leaving exactly the half-dispatched state
+          # the comment above exists to prevent.
+          # The fix is the upload method, not the role. objectViewer would work and
+          # would hand the agent identity read access to ledger/cm-ledger.db in this
+          # same bucket -- invariant 3, and the reason runner_results is conditioned
+          # to the find/ and verify/ prefixes. This is the same call the exporter in
+          # 51-find-job.yaml already makes, with the same credential.
+          curl -sf -X POST \
+            -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/RUN.json \
+            "https://storage.googleapis.com/upload/storage/v1/b/${{ vars.RESULTS_BUCKET }}/o?uploadType=media&name=find/$SHA/RUN.json" \
+            -o /dev/null -w "RUN.json published http=%{http_code}\n"
+          echo "dispatched $JOB for $SHA"
+
+      # Deliberately NOT `kubectl wait`. The whole design is that nobody blocks here.
+      - name: Report and exit
+        run: |
+          echo "::notice::find fan-out dispatched for ${{ github.sha }} -- merge is NOT waiting on it."
+          echo "Verdicts land in the ledger; the merge gate reads them in cm-gate.yml."

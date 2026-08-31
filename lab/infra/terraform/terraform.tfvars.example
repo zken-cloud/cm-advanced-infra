@@ -1,0 +1,58 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+project_id  = "your-cm-allowlisted-project"
+region      = "us-central1"
+name_prefix = "cm-lab"
+
+# NOT WIRED -- read by variables.tf and outputs.tf and consumed by nothing else.
+# The cap that is actually in force is `max_parallelism` in RUN.json, which
+# reconcile.py defaults to 20. Left here as the intended knob; do not rely on it.
+max_verify_parallelism = 100
+
+# REQUIRED, and digest-pinned rather than tagged. This is the image that holds the
+# cluster credential and the ledger write, so it is deliberately NOT the agent
+# image: agents run model-generated code (D36). Build it with
+# `PROJECT=... TAG=... infra/reconciler-image/build.sh`, which prints the digest.
+#
+# It has no default on purpose -- a stale default would be applied silently. It
+# also has no value we can guess for you, so `terraform plan` fails until it is
+# set. That failure is the point; leaving it unset used to be masked by two
+# "undeclared variable" warnings from the removed Cloud SQL knobs (D34).
+#
+# Re-set it after EVERY reconciler build: the image bakes pipeline/ and k8s/, so a
+# manifest fix is not deployed until this changes (D38).
+# REQUIRED, and a DIGEST -- build it in 0c with infra/reconciler-image/build.sh.
+# Terraform does not resolve image refs at plan time, so a placeholder gives a clean
+# plan and then fails after the cluster is already built.
+reconciler_image = "REGION-docker.pkg.dev/PROJECT/cm-lab/cm-reconciler@sha256:..." 
+
+# Secret Manager secret holding a GitHub token that can clone the target.
+# Required for a PRIVATE target: the reconciler must fetch the source to resolve
+# fp3's enclosing function, and refuses to fold a tree it could not fetch (D29).
+# Empty means public targets only.
+# Leave COMMENTED OUT until 0g has created the Secret Manager secret. Naming a
+# secret that does not exist yet fails `apply` with a 404 that reads like a
+# permissions problem. Private target repos only.
+# github_token_secret = "cm-lab-gh-token"
+
+# The scale-out write path. Off, and there is no live topic: D34 removed Cloud SQL
+# and D25 left the ledger as one GCS object under a generation CAS, so nothing
+# publishes observations. Provisioning a topic nothing connects to is a standing
+# bill and a false statement about the system.
+enable_pubsub = false
+
+results_bucket_ttl_days = 14   # find/verify blobs age out
+poc_bucket_ttl_days     = 0    # 0 = keep the PoC corpus forever (invariant 7)
+
+# There is no use_spot_pods knob. Spot preemption failed the verify Job at 3/12
+# completions and a preempted verify pod costs full agent-minutes for no verdict.
+
+# Every participant repo whose GitHub Actions may assume the gate and ingester
+# identities. EMPTY BY DEFAULT, which means cm-lab-gate and cm-lab-ingester get no
+# WIF binding and cm-risk-accept.yml fails at auth with a WIF-shaped error. 0g
+# creates the runner, gate AND ingester bindings by hand, so this is belt-and-braces.
+# Set this AFTER 0h (you need the repo name) and re-run `terraform apply`.
+# Leave COMMENTED OUT for the first apply: it references the `github` WIF pool,
+# which 0g creates, and names the repo, which 0h creates -- both come AFTER 0e.
+# Uncomment and re-apply once 0h and 0g are done. Same ordering rule as
+# github_token_secret above.
+# github_repos = ["your-account/cm-lab"]

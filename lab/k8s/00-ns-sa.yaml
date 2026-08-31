@@ -1,0 +1,20 @@
+# Namespace + KSA. The KSA NAME must match the WIF binding TF creates:
+# iam.tf binds serviceAccount:PROJECT.svc.id.goog[cm/${name_prefix}-runner].
+# With name_prefix=cm-lab that is [cm/cm-lab-runner] — so the KSA is cm-lab-runner,
+# NOT cm-runner. A name mismatch yields an EMPTY metadata identity and 401 on GCS.
+#
+# __PROJECT__ is YOUR project. Apply via:
+#   sed "s#__PROJECT__#$PROJECT#g" k8s/00-ns-sa.yaml | kubectl apply -f -
+# Applying it unrendered annotates the KSA to a project that is not yours, which
+# produces the same empty-identity 401 as the name mismatch above.
+apiVersion: v1
+kind: Namespace
+metadata: {name: cm}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cm-lab-runner
+  namespace: cm
+  annotations:
+    iam.gke.io/gcp-service-account: cm-lab-runner@__PROJECT__.iam.gserviceaccount.com

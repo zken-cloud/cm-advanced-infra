@@ -1,0 +1,42 @@
+[
+  {
+    "name": "repo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "team",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "fingerprint",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "pr_url",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "opened_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "outcome",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "closed_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "snapshot_ts",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  }
+]

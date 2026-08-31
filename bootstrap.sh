@@ -138,18 +138,17 @@ CM_SHA=$(sha256sum /usr/local/bin/cm | cut -d' ' -f1)
 echo "cm $(/usr/local/bin/cm --version 2>&1 | head -1)  sha256=$CM_SHA"
 
 step "0f/1 clone the guide @ $${GUIDE_REF}"
+# The token is still read here -- the find pods and the reconciler need it to clone
+# the PARTICIPANT's repo -- but the payload clone below no longer uses it.
 GH_TOKEN=$(gcloud secrets versions access latest --secret="$GH_SECRET" --project="$PROJECT") || die "read gh token secret"
 [ -n "$GH_TOKEN" ] || die "gh token secret is EMPTY -- nothing downstream can clone"
-# Authenticate the clone. The guide repo is private (it ships answer-key material:
-# the harvested ruleset maps a rule to every planted bug), so an anonymous clone
-# fails with `could not read Username for 'https://github.com'` -- the same symptom
-# a find pod gives when its clone secret is missing. Measured: this is exactly where
-# the first apply into an empty project stopped.
-GUIDE_AUTH=$(printf %s "$GUIDE_REPO" | sed "s#https://#https://x-access-token:$GH_TOKEN@#")
-git clone -q --branch "$GUIDE_REF" "$GUIDE_AUTH" /opt/cm-advanced-lab || die "clone guide (is the PAT valid, and does it have access to $GUIDE_REPO?)"
-GUIDE=/opt/cm-advanced-lab
-# Do not leave the token in .git/config where every later `git remote -v` prints it.
-git -C "$GUIDE" remote set-url origin "$GUIDE_REPO"
+# ANONYMOUS. The payload lives in this same public repo under lab/. It used to be a
+# private repo cloned with the PAT, which meant `terraform apply` could succeed in
+# full and the VM would then die here, ~2 minutes later, in a process nobody is
+# watching -- a silent failure reported by a participant whose PAT had no access.
+# A public clone cannot fail that way.
+git clone -q --branch "$GUIDE_REF" "$GUIDE_REPO" /opt/cm-lab-payload || die "clone payload from $GUIDE_REPO @ $${GUIDE_REF} (public: no credentials involved)"
+GUIDE=/opt/cm-lab-payload/lab
 
 step "0f/2 the lab tree"
 # Config for setup-tree, which is the ONE implementation and is what cm-lab-status

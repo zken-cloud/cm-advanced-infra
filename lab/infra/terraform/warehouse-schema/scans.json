@@ -1,0 +1,62 @@
+[
+  {
+    "name": "repo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "sha",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "shards_expected",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "shards_completed",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "agent_version",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "completed_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "verify_dispatched",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "verify_attempted",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "pushed_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "verdicts_complete_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "merge_attempted_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "snapshot_ts",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  }
+]

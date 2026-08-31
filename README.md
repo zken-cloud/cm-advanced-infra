@@ -4,10 +4,19 @@ Terraform for the CodeMender advanced lab environment. One `apply` builds a
 lab VM reachable only over IAP, a private copy of the target repository,
 Workload Identity federation for GitHub Actions, and a GKE Autopilot cluster.
 
-This repository is **only the environment**. The lab exercises, the pipeline and
-the write-up live in `zken-cloud/cm-advanced-lab`, which is private — it ships
-answer-key material for a public deliberately-vulnerable target, and publishing
-it would solve the benchmark it measures.
+This repository is **self-contained**: the terraform at the root builds the
+environment, and `lab/` carries everything that runs inside it — the pipeline, the
+container images, the cluster terraform, the Kubernetes Jobs, the hooks and the
+workflows. The VM clones it anonymously. Nothing here needs a credential to read.
+
+What is deliberately **not** here is any rule that names a bug in the lab target.
+Deriving those from your own verified findings is Step 7 of the lab, and shipping
+them pre-made would both solve the exercise and solve the public benchmark the
+exercise is measured against. `lab/pipeline/harvested-rules/` therefore holds one
+generic example rule and nothing else.
+
+The written guide, the decision record and the measurements live separately and
+are not needed to run any of this.
 
 ## What you need first
 
@@ -31,6 +40,20 @@ before you spend twenty minutes finding out:
 curl -sI -H "Authorization: token $TF_VAR_github_token" https://api.github.com/user \
   | grep -i x-oauth-scopes          # must list BOTH repo and workflow
 ```
+
+## Layout
+
+    *.tf, bootstrap.sh, setup-tree.sh   the environment: VM, IAP, WIF, your repo
+    lab/infra/{runner,reconciler}-image the two container images the VM builds
+    lab/infra/terraform                 the cluster half, applied BY the VM
+    lab/k8s                             find/verify Jobs, namespace, service account
+    lab/pipeline                        ledger, fingerprinting, harvest, gate, replay
+    lab/hooks                           the pre-commit hook
+    lab/.github/workflows               fan-out, gate, risk-accept — copied into YOUR repo
+
+`lab/.github/` is deliberately not the repository's own `.github/`: those workflows
+are meant to run in a participant's lab repo, and at the root GitHub would try to
+run them here, where the variables they need do not exist.
 
 ## Run it
 

@@ -1,0 +1,67 @@
+[
+  {
+    "name": "acceptance_id",
+    "type": "INT64",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "fingerprint",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "repo",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "scope",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "reason_code",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "reason_text",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "owner",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "approved_by",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "pr_url",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "expires_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "revoked_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "created_at",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "snapshot_ts",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  }
+]

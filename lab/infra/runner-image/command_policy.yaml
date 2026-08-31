@@ -1,0 +1,46 @@
+# ~/.codemender/command_policy.yaml
+# Global command execution policy for CodeMender agent.
+# Schema confirmed against cm 0.2.0, unchanged in 0.4.0: `block` = exact command names,
+# `block_patterns` = regex matched anywhere in the command string.
+# This is the REAL control surface (config.yaml `security.block_patterns` is inert);
+# it fails OPEN on a parse error, so the image smoke test must assert a custom denial.
+
+block:
+  # Data exfiltration
+  - curl
+  - wget
+  - nc
+  - ssh
+  - scp
+  # Destructive operations
+  - rm
+  - mkfs
+  - dd
+  # Privilege escalation
+  - sudo
+  - su
+  # Permission change
+  - chmod
+  # System control
+  - reboot
+  - shutdown
+  - kill
+  - pkill
+  # Package Managers
+  - pip
+  - npm
+  - apt
+
+# Dangerous patterns (regex, matched anywhere in command string)
+block_patterns:
+  # VCS Mutations (prevent pushing unreviewed code or rewriting history)
+  - '\bgit\s+(push|commit|rebase|reset\s+--hard|clean)\b'
+  - '\b(g4|hg|jj)\s+(submit|commit|mail|upload|revert)\b'
+  # Shell injection via find
+  - '-exec'
+  # Piping to shell interpreters
+  - '\| sh'
+  - '\| bash'
+  - '\| /bin/sh'
+  # Subshell execution
+  - '\$\('
