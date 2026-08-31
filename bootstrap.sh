@@ -147,7 +147,19 @@ GH_TOKEN=$(gcloud secrets versions access latest --secret="$GH_SECRET" --project
 # full and the VM would then die here, ~2 minutes later, in a process nobody is
 # watching -- a silent failure reported by a participant whose PAT had no access.
 # A public clone cannot fail that way.
-git clone -q --branch "$GUIDE_REF" "$GUIDE_REPO" /opt/cm-lab-payload || die "clone payload from $GUIDE_REPO @ $${GUIDE_REF} (public: no credentials involved)"
+git clone -q --branch "$GUIDE_REF" "$GUIDE_REPO" /opt/cm-lab-payload || die "clone payload from $GUIDE_REPO @ $GUIDE_REF (public: no credentials involved)"
+# Record what we got, then DROP the .git. Two reasons, both about the participant's
+# repo being the only one that matters:
+#   * setup-tree symlinks ~/cm-lab-payload into this tree. With .git present that
+#     puts the user inside a checkout whose origin is the shared public repo, one
+#     `git push` away from writing to it -- and an org member HAS that access.
+#   * nothing after the clone needs git here. The payload is read-only input.
+# PROVENANCE keeps the pinned sha, which is the part worth keeping (invariant 10).
+git -C /opt/cm-lab-payload rev-parse HEAD > /tmp/payload-sha
+printf 'payload %s @ %s\nsha %s\n' "$GUIDE_REPO" "$GUIDE_REF" "$(cat /tmp/payload-sha)" \
+  > /opt/cm-lab-payload/PROVENANCE
+rm -rf /opt/cm-lab-payload/.git
+echo "payload pinned at $(cat /tmp/payload-sha) (.git dropped: read-only input)"
 GUIDE=/opt/cm-lab-payload/lab
 
 step "0f/2 the lab tree"
