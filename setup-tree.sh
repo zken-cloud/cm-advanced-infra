@@ -39,6 +39,10 @@ run cp -r "$GUIDE/targets/oracle-specs" "$H/cm-lab/targets/"
 # blind spot it exists to close (invariant 7).
 run mkdir -p "$H/cm-lab/infra/runner-image"
 run cp -r "$GUIDE/infra/runner-image/canary" "$H/cm-lab/infra/runner-image/"
+# .cm/ carries the risk-acceptance template and is where risk-accept.py writes.
+# Missed in the payload move: `git ls-files` patterns that name directories skip
+# dotfiles, and so did the check I used to convince myself the move was complete.
+run cp -r "$GUIDE/.cm" "$H/cm-lab/"
 rm -rf "$H/cm-lab/pipeline/__pycache__" "$H/cm-lab/pipeline/.pytest_cache"
 
 # `.cm/*` with a negation, never `.cm/`: git cannot re-include a path inside an

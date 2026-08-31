@@ -115,7 +115,12 @@ check("invariant 6: nothing before the verify loop can emit exploit_failed",
 # the fix for a whole class of bug should not be "notice it faster at runtime".
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DOCKERFILE = os.path.join(_ROOT, "infra", "runner-image", "Dockerfile")
-_df = open(_DOCKERFILE).read().replace("\\\n", " ")
+# The runner Dockerfile ships with the PAYLOAD, not with a participant's lab repo,
+# and these two checks cross-reference the two files. Where it is absent there is
+# nothing to compare -- say so and carry on, rather than raising at import and
+# reporting a whole suite as broken when it is merely out of scope.
+_HAVE_DF = os.path.exists(_DOCKERFILE)
+_df = open(_DOCKERFILE).read().replace("\\\n", " ") if _HAVE_DF else ""
 
 _provided_files, _provided_dirs = set(), set()
 for line in _df.splitlines():
@@ -155,10 +160,13 @@ for w in sorted(_wanted):
     if w in _provided_files or any(w.startswith(d) for d in _provided_dirs):
         continue
     _missing.append(w)
-check("D50: every /opt/cm path the pod uses is COPY'd by the runner Dockerfile "
-      f"(missing: {_missing})", not _missing)
-check("D50: the oracle specs directory ships in the image",
-      "/opt/cm/oracle-specs/" in _provided_dirs)
+if not _HAVE_DF:
+    print("SKIP  D50 runner-Dockerfile cross-checks (not a payload checkout)")
+else:
+    check("D50: every /opt/cm path the pod uses is COPY'd by the runner Dockerfile "
+          f"(missing: {_missing})", not _missing)
+    check("D50: the oracle specs directory ships in the image",
+          "/opt/cm/oracle-specs/" in _provided_dirs)
 
 # D51: the spec must be consulted for EVERY finding. Gating it on $NEEDS_ORACLE put
 # a stable key (fp3) behind an unstable one (CM's CWE class) and lost a finding that

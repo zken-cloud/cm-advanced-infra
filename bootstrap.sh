@@ -162,6 +162,16 @@ rm -rf /opt/cm-lab-payload/.git
 echo "payload pinned at $(cat /tmp/payload-sha) (.git dropped: read-only input)"
 GUIDE=/opt/cm-lab-payload/lab
 
+# pipeline/requirements.txt is installed into the RECONCILER image but was never
+# installed on the VM, so `consolidate-dedup.py` fell back to a regex when
+# tree_sitter was missing and returned None for const/arrow/member function
+# shapes. Central identity was never at risk -- the reconciler computes fp3 and it
+# has the parser (invariant 2) -- but a participant running it locally got
+# silently worse fingerprints, and 6/10 on test_dedup. --break-system-packages
+# because Debian 12 is PEP 668 and this is a disposable lab VM.
+pip install --break-system-packages -q -r "$GUIDE/pipeline/requirements.txt" \
+  >> /tmp/pip.log 2>&1 || echo "WARN: pipeline requirements failed to install (see /tmp/pip.log)"
+
 step "0f/2 the lab tree"
 # Config for setup-tree, which is the ONE implementation and is what cm-lab-status
 # calls if your tree is not there yet.

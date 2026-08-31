@@ -1,0 +1,18 @@
+# Copy to `.cm/risk-accepted/<fingerprint>.yaml`, open a PR, get it approved.
+# The PR is the audit trail. Merging it writes one row to the ledger; the gate reads
+# that row and returns RISK_ACCEPTED — which is deliberately NOT the same as PASS,
+# because "shipped clean" and "shipped with a named owner holding the risk" must be
+# distinguishable when someone asks later.
+
+fingerprint: fp3:0000000000000000     # must already be `verified` in the ledger
+scope: trunk                          # 'trunk' or a release tag. Never blanket.
+reason_code: no-attacker              # one of ledger.RISK_REASONS; structured so the
+                                      # rate per category is a signal about the
+                                      # DETECTOR, not just the fix queue
+reason_text: >-
+  Why this specific finding is an acceptable risk in this specific deployment.
+  Not "low priority" — that is a scheduling statement, not a risk one.
+owner: your-github-handle             # the accountable human. Not a team alias:
+                                      # an alias cannot be asked anything in November.
+expires_at: 2026-11-01                # mandatory, max 90 days out. An acceptance with
+                                      # no end date is a silent policy change.

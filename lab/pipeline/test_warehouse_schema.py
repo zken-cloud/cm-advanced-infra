@@ -12,6 +12,12 @@ import os, sys, json, tempfile, importlib.util, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SCHEMA_DIR = os.path.join(ROOT, "infra", "terraform", "warehouse-schema")
+if not os.path.isdir(SCHEMA_DIR):
+    # Same reasoning as test_verify_manifest: the warehouse schema ships with the
+    # payload, not with a participant's lab repo. Nothing to check here, and an
+    # import-time FileNotFoundError would read as a broken suite.
+    print("SKIP  warehouse schema checks (not a payload checkout)")
+    raise SystemExit(0)
 
 def load(name, fn):
     s = importlib.util.spec_from_file_location(name, os.path.join(HERE, fn))
