@@ -31,6 +31,11 @@ def _load(name, path):
 
 R = _load("orun", os.path.join(HERE, "oracle-run.py"))
 SPEC_DIR = os.path.join(ROOT, "targets", "oracle-specs")
+# The spec-integrity loops below walk SPEC_DIR. It is absent wherever no spec has
+# been written yet, and listdir on a missing directory is a failure that says
+# nothing about the code under test -- so those loops iterate an empty list instead.
+_SPECS = sorted(f for f in (os.listdir(SPEC_DIR) if os.path.isdir(SPEC_DIR) else [])
+                if f.endswith((".yaml", ".yml")))
 
 
 def _spec():
@@ -190,7 +195,7 @@ def t_every_spec_entry_is_dispatchable():
         "statistical-timing-oracle": {"request_true", "request_false"},
         "rss-growth-oracle": {"drive"},
     }
-    for name in os.listdir(SPEC_DIR):
+    for name in _SPECS:
         if not name.endswith((".yaml", ".yml")):
             continue
         import yaml
@@ -205,7 +210,7 @@ def t_every_spec_entry_is_dispatchable():
 def t_every_spec_oracle_exists_in_oracles_py():
     O = _load("o", os.path.join(HERE, "oracles.py"))
     import yaml
-    for name in os.listdir(SPEC_DIR):
+    for name in _SPECS:
         if not name.endswith((".yaml", ".yml")):
             continue
         spec = yaml.safe_load(open(os.path.join(SPEC_DIR, name)))
@@ -217,7 +222,7 @@ def t_every_spec_entry_states_a_claim():
     """The claim travels into the evidence and is what the ledger records as proven.
     An entry without one lets a narrow measurement be read as the CWE's worst case."""
     import yaml
-    for name in os.listdir(SPEC_DIR):
+    for name in _SPECS:
         if not name.endswith((".yaml", ".yml")):
             continue
         spec = yaml.safe_load(open(os.path.join(SPEC_DIR, name)))
@@ -228,7 +233,7 @@ def t_every_spec_entry_states_a_claim():
 
 def t_app_block_can_boot_and_be_probed():
     import yaml
-    for name in os.listdir(SPEC_DIR):
+    for name in _SPECS:
         if not name.endswith((".yaml", ".yml")):
             continue
         spec = yaml.safe_load(open(os.path.join(SPEC_DIR, name)))

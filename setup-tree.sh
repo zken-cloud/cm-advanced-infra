@@ -24,6 +24,13 @@ run git -C "$H/cm-lab" remote remove origin
 run git -C "$H/cm-lab" remote add origin "https://x-access-token:$TOKEN@github.com/$REPO_FULL.git"
 run cp -r "$GUIDE/pipeline" "$GUIDE/hooks" "$GUIDE/k8s" "$GUIDE/.github" "$H/cm-lab/"
 run cp -r "$GUIDE/targets/harvest-fp-cases" "$H/cm-lab/"
+# targets/oracle-specs keeps its path: oracle-run.py takes --spec
+# targets/oracle-specs/<target>.yaml, and it is where you write the spec for a
+# finding you verified. Without it the four spec-integrity tests listdir a
+# directory that is not there -- 19/19 in the repo, 15/19 in the lab tree, from
+# layout alone.
+run mkdir -p "$H/cm-lab/targets"
+run cp -r "$GUIDE/targets/oracle-specs" "$H/cm-lab/targets/"
 rm -rf "$H/cm-lab/pipeline/__pycache__" "$H/cm-lab/pipeline/.pytest_cache"
 
 # `.cm/*` with a negation, never `.cm/`: git cannot re-include a path inside an
