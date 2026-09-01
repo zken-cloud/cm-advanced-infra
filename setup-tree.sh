@@ -116,7 +116,14 @@ run bash -c "printf '%s\n' '.cm/*' '!.cm/risk-accepted/' semgrep.json cm-finding
 run npm --prefix "$H/cm-lab" install --silent || echo "WARN: npm install failed; run it in ~/cm-lab"
 
 run git -C "$H/cm-lab" add -A
-run git -C "$H/cm-lab" -c user.email="$U@cm-lab" -c user.name="$U" commit -q -m "add the cm pipeline"
+# PERSIST the identity, do not pass it with -c. The first version set it inline for
+# this one commit, which left the participant's own `git commit` in Step 4 dying on
+# "Author identity unknown -- please tell me who you are" on a fresh VM. Their
+# commit is the one the whole fan-out lane exists to serve, so it has to work
+# without a detour into git config.
+run git config --global user.email "$U@cm-lab"
+run git config --global user.name "$U"
+run git -C "$H/cm-lab" commit -q -m "add the cm pipeline"
 # On main, before any branch is cut: this is what makes cm-fanout fire at all, and
 # what Step 3's `cm vcs reset` will otherwise delete as untracked.
 run git -C "$H/cm-lab" push -q origin HEAD:main || echo "WARN: push failed; push ~/cm-lab before Step 4"
