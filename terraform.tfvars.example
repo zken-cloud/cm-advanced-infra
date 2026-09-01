@@ -9,9 +9,10 @@
 #   workflow  -- without it the push carrying .github/workflows/ is REJECTED, and
 #                the fan-out never fires
 #
-# NOT read:org, though `gh auth login` demands it: everything here passes GH_TOKEN
-# in the environment instead, which skips gh's scope validation and makes the same
-# calls. Reintroducing `gh auth login` widens this token by two scopes.
+# NOT read:org, though `gh auth login` demands it -- measured: a token advertising
+# exactly `repo, workflow` is rejected with "missing required scope 'read:org'".
+# Everything here passes the token in the environment instead, which skips that
+# check and makes the same calls. Reintroducing `gh auth login` widens this token.
 # Verify before applying:
 #   curl -sI -H "Authorization: token $TF_VAR_github_token" \
 #     https://api.github.com/user | grep -i x-oauth-scopes
