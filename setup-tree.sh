@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build ~/cm-lab for one user: their private repo, with the pipeline on top,
 # committed and pushed. The bootstrap calls this; you can re-run it by hand if
-# OS Login had not created your account when the VM first booted.
+# OS Login had not created your account when the VM first booted, or to repair an
+# origin pointing at the wrong repo -- on a tree that already exists it re-points
+# the remote and touches nothing else.
 #
 #   sudo cm-lab-setup-tree "$(id -un)"
 set -euo pipefail
@@ -10,12 +12,26 @@ U="${1:?usage: cm-lab-setup-tree <username>}"
 
 H=$(getent passwd "$U" | cut -d: -f6)
 [ -n "$H" ] || { echo "no home directory for $U"; exit 1; }
-[ -d "$H/cm-lab" ] && { echo "$H/cm-lab already exists -- nothing to do"; exit 0; }
-
 TOKEN=$(gcloud secrets versions access latest --secret="$GH_SECRET" --project="$PROJECT")
 [ -n "$TOKEN" ] || { echo "gh token secret is empty"; exit 1; }
 
 run() { sudo -u "$U" -H "$@"; }
+
+# An existing tree used to mean "nothing to do", which made re-running this script
+# useless as a repair: the one thing that can be wrong on a tree that already
+# exists is its origin, and that was the one thing the early exit refused to touch.
+# So repair the remote and stop. NEVER rebuild -- there is work in that tree, and
+# the guide's Step 4 check sends people here.
+if [ -d "$H/cm-lab" ]; then
+  if run git -C "$H/cm-lab" rev-parse --git-dir >/dev/null 2>&1; then
+    run git -C "$H/cm-lab" remote remove origin >/dev/null 2>&1 || true
+    run git -C "$H/cm-lab" remote add origin "https://x-access-token:$TOKEN@github.com/$REPO_FULL.git"
+    echo "$H/cm-lab already exists -- origin re-pointed at $REPO_FULL, nothing else touched"
+  else
+    echo "$H/cm-lab exists but is not a git repo -- move it aside and re-run"
+  fi
+  exit 0
+fi
 
 # Seed from upstream, then point origin at YOUR (empty) repo. Never push branches
 # or let an agent write patches into somebody else's repository.
@@ -59,4 +75,8 @@ run git -C "$H/cm-lab" -c user.email="$U@cm-lab" -c user.name="$U" commit -q -m 
 run git -C "$H/cm-lab" push -q origin HEAD:main || echo "WARN: push failed; push ~/cm-lab before Step 4"
 
 ln -sfn "$GUIDE" "$H/cm-lab-payload"; chown -h "$U" "$H/cm-lab-payload"
-echo "~/cm-lab ready for $U"
+# Say whose repo this is, at build time. Every push in Part C follows origin, and
+# the participant has a second clone (the shared cm-advanced-infra) on their
+# workstation where the same git commands are equally valid. Name, never URL:
+# origin carries the PAT.
+echo "~/cm-lab ready for $U -- origin is $REPO_FULL (your repo; the shared repos are read-only inputs)"
