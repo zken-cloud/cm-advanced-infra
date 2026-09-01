@@ -25,17 +25,34 @@ run() { sudo -u "$U" -H "$@"; }
 # gh, for the user. The bootstrap authenticated gh as ROOT, which left every `gh`
 # command the guide asks a participant to run -- the Step 4 checkpoint, the Step 6
 # PR, the branch protection call -- failing with "not logged into any GitHub
-# hosts" on a tree that was otherwise perfect. GH_TOKEN rather than
-# `gh auth login`: login validates scopes and demands read:org, which this lab
-# deliberately does not ask for. The token is already in this user's
-# ~/cm-lab/.git/config, so ~/.bashrc adds no exposure that was not there.
-if ! grep -q GH_TOKEN "$H/.bashrc" 2>/dev/null; then
-  run tee -a "$H/.bashrc" >/dev/null <<BASHRC
-
-# cm-lab: gh reads this. \`gh auth login\` would demand read:org; this does not.
-export GH_TOKEN=$TOKEN
-BASHRC
-  echo "gh: GH_TOKEN exported in $H/.bashrc"
+# hosts" on a tree that was otherwise perfect.
+#
+# Write gh's OWN config rather than `gh auth login`: login validates scopes and its
+# documented minimum is repo, read:org and gist, so a token carrying the two scopes
+# this lab asks for is rejected. Writing hosts.yml is the same end state without the
+# check.
+#
+# And hosts.yml rather than `export GH_TOKEN` in ~/.bashrc, which was the first
+# attempt: Debian's .bashrc returns before line 1 of anything appended to it when
+# the shell is not interactive, so gh worked when a participant typed a command and
+# failed in every script and every `gcloud compute ssh --command`. That is the same
+# trap this file's own bootstrap already documents for /etc/profile.d. hosts.yml is
+# read by gh in every shell, and 0600 in the user's home beats an env var that
+# shows up in `env` and in every child process.
+GH_OWNER="${REPO_FULL%%/*}"
+if [ ! -s "$H/.config/gh/hosts.yml" ]; then
+  run mkdir -p "$H/.config/gh"
+  run tee "$H/.config/gh/hosts.yml" >/dev/null <<HOSTS
+github.com:
+    users:
+        $GH_OWNER:
+            oauth_token: $TOKEN
+    git_protocol: https
+    user: $GH_OWNER
+    oauth_token: $TOKEN
+HOSTS
+  run chmod 0600 "$H/.config/gh/hosts.yml"
+  echo "gh: authenticated as $GH_OWNER via ~/.config/gh/hosts.yml"
 fi
 
 # cm, for the user. `cm report import` in Step 3 fails outright without this --
