@@ -17,6 +17,36 @@ TOKEN=$(gcloud secrets versions access latest --secret="$GH_SECRET" --project="$
 
 run() { sudo -u "$U" -H "$@"; }
 
+# --- per-user environment, independent of the tree ---------------------------
+# Both of these run BEFORE the existing-tree exit, because they are properties of
+# the ACCOUNT, not of the checkout, and a participant whose tree already exists
+# needs them just as much.
+
+# gh, for the user. The bootstrap authenticated gh as ROOT, which left every `gh`
+# command the guide asks a participant to run -- the Step 4 checkpoint, the Step 6
+# PR, the branch protection call -- failing with "not logged into any GitHub
+# hosts" on a tree that was otherwise perfect. GH_TOKEN rather than
+# `gh auth login`: login validates scopes and demands read:org, which this lab
+# deliberately does not ask for. The token is already in this user's
+# ~/cm-lab/.git/config, so ~/.bashrc adds no exposure that was not there.
+if ! grep -q GH_TOKEN "$H/.bashrc" 2>/dev/null; then
+  run tee -a "$H/.bashrc" >/dev/null <<BASHRC
+
+# cm-lab: gh reads this. \`gh auth login\` would demand read:org; this does not.
+export GH_TOKEN=$TOKEN
+BASHRC
+  echo "gh: GH_TOKEN exported in $H/.bashrc"
+fi
+
+# cm, for the user. `cm report import` in Step 3 fails outright without this --
+# "CodeMender has not been initialized" -- and nothing in the lab ever ran it.
+# Guarded: `cm init` on an initialised workspace PROMPTS to overwrite, and a `y`
+# there destroys a config the participant may have edited.
+if [ ! -d "$H/.codemender" ]; then
+  run cm init >/dev/null 2>&1 && echo "cm: workspace initialised for $U" \
+    || echo "WARN: cm init failed -- run it yourself before Step 3"
+fi
+
 # An existing tree used to mean "nothing to do", which made re-running this script
 # useless as a repair: the one thing that can be wrong on a tree that already
 # exists is its origin, and that was the one thing the early exit refused to touch.

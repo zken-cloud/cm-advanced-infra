@@ -301,9 +301,15 @@ done
 [ "$APPLIED" = 1 ] || { grep -aoE 'Error:[^"]{0,200}' /tmp/tf-apply.log | tail -10; die "terraform apply (see /tmp/tf-apply.log)"; }
 
 step "0g set RUNNER_IMAGE (a digest exists only now)"
-echo "$GH_TOKEN" | gh auth login --with-token || die "gh auth"
-gh variable set RUNNER_IMAGE --repo "$REPO_FULL" --body "$RUNNER_DIGEST" || die "gh variable RUNNER_IMAGE"
-gh variable list --repo "$REPO_FULL"
+# GH_TOKEN in the environment, NOT `gh auth login --with-token`. gh validates the
+# token on login and its documented minimum is `repo`, `read:org` and `gist` -- so a
+# token carrying exactly the two scopes this lab asks for is REJECTED at login with
+# "missing required scope 'read:org'", and the bootstrap dies at 0g having built
+# both images. The env var skips that validation and makes the same API call. gh's
+# own help recommends it. Reported by a lab participant, 2026-09-01.
+GH_TOKEN="$GH_TOKEN" gh variable set RUNNER_IMAGE --repo "$REPO_FULL" --body "$RUNNER_DIGEST" \
+  || die "gh variable RUNNER_IMAGE"
+GH_TOKEN="$GH_TOKEN" gh variable list --repo "$REPO_FULL"
 
 step "0e/2 kubernetes namespace, KSA and clone secret"
 gcloud container clusters get-credentials "$PREFIX" --region "$REGION" --project "$PROJECT" || die "get-credentials"
