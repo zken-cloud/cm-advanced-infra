@@ -124,9 +124,47 @@ def main():
     # If verdicts were REFUSED the results did not actually land, so this run is not
     # a completed scan — recording it as complete would let a broken pipeline read
     # as a clean bill of health, the same fail-open bug D22 exists to close.
-    landed = a.shards_completed if not mismatched else 0
+    # Q13/D55, WITH TEETH. The coverage table exists to separate "looked and found
+    # nothing" from "never looked" -- and until 2026-09-03 nothing consulted it, so
+    # the distinction was recorded and then ignored at the only place it matters.
+    #
+    # Measured twice that day, on two fresh projects: `cm find` never started
+    # (`StartSession timed out`), the EXIT trap published the shards anyway -- which
+    # is correct, invariant 5 -- the reconciler folded them, and the ledger recorded
+    # shards_completed=3 / findings=0. The gate then answered
+    #   PASS "scanned (3/3 shards), no verified-unfixed findings"
+    # for a commit CodeMender had not read a single file of. That is exactly the
+    # confusion this whole design exists to prevent, arriving at the one surface
+    # that gates a merge.
+    #
+    # The test is `in_scope > 0 and observed == 0` across EVERY shard. Not the
+    # agent version: on the failed runs the coverage envelope still said
+    # codemender-0.5.0, because the binary reports its version fine -- it is the
+    # SESSION that dies -- so a version check would have caught nothing.
+    # `max` over the shards, not `all`: one shard that genuinely looked is enough to
+    # make this a scan, and this clause is aimed at the total outage, which is the
+    # case that reads as clean.
+    cov_envs = []
+    for f in a.coverage:
+        try:
+            cov_envs.append((f, json.load(open(f))))
+        except Exception as e:
+            print(f"  coverage: {os.path.basename(f)} unreadable ({e}) — SKIPPED, "
+                  f"this shard's files will look uncovered")
+    unexamined = False
+    if cov_envs:
+        cov_in_scope = max(int(e.get("files_in_scope") or 0) for _, e in cov_envs)
+        cov_observed = max(int(e.get("files_observed") or 0) for _, e in cov_envs)
+        unexamined = cov_in_scope > 0 and cov_observed == 0
+
+    landed = a.shards_completed if not (mismatched or unexamined) else 0
     if mismatched:
         print(f"  scan recorded as INCOMPLETE: {len(files)} verdict(s) refused, none landed")
+    if unexamined:
+        print(f"  scan recorded as INCOMPLETE: {cov_in_scope} file(s) in scope and "
+              f"NOT ONE observed by the agent — nothing examined this sha. The shards "
+              f"published (invariant 5) but the agent never read the tree; recording "
+              f"this as a completed scan is what let a CodeMender outage answer PASS.")
     ledger.record_scan(db, a.repo, a.sha, a.shards_expected, landed, a.agent, a.ts)
 
     # Q8/D57: the race, stamped where the facts are. `--pushed-at` comes from the
@@ -148,15 +186,9 @@ def main():
     # findings across 24 in-scope files" and "nobody looked" have been the same row
     # count since this design started, and D33's argument for not scanning prod
     # rests on being able to tell them apart.
-    if a.coverage:
+    if cov_envs:
         merged, scope, cov_agent = {}, ".", a.agent
-        for f in a.coverage:
-            try:
-                env = json.load(open(f))
-            except Exception as e:
-                print(f"  coverage: {os.path.basename(f)} unreadable ({e}) — SKIPPED, "
-                      f"this shard's files will look uncovered")
-                continue
+        for f, env in cov_envs:
             scope = env.get("scope") or scope
             cov_agent = env.get("agent_version") or cov_agent
             for r in env.get("files", []):

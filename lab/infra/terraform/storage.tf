@@ -2,7 +2,7 @@
 resource "google_storage_bucket" "results" {
   name                        = "${var.project_id}-${var.name_prefix}-results"
   location                    = var.region
-  force_destroy               = true
+  force_destroy               = var.bucket_force_destroy
   uniform_bucket_level_access = true
   # NOT conditional. The ledger is a single object rewritten by every run, and
   # versioning is the only undo it has -- the difference between a bad fold
@@ -33,7 +33,7 @@ resource "google_storage_bucket" "results" {
 resource "google_storage_bucket" "poc" {
   name                        = "${var.project_id}-${var.name_prefix}-poc"
   location                    = var.region
-  force_destroy               = true
+  force_destroy               = var.bucket_force_destroy
   uniform_bucket_level_access = true
   dynamic "lifecycle_rule" {
     for_each = var.poc_bucket_ttl_days > 0 ? [1] : []

@@ -23,7 +23,17 @@ spec:
   # always done this; the find Job did not.
   backoffLimitPerIndex: 1
   maxFailedIndexes: __SHARDS__
-  backoffLimit: __SHARDS__
+  # DELIBERATELY NON-BINDING, and not __SHARDS__. backoffLimit counts POD failures,
+  # not failed indexes, so the reachable maximum is indexes x (backoffLimitPerIndex
+  # + 1) -- 6 for a 3-shard find, twice what `backoffLimit: __SHARDS__` allowed.
+  # Measured 2026-09-03: the Job died with reason=BackoffLimitExceeded at failed=6
+  # while failedIndexes was still just "0" -- the WHOLE-JOB budget terminated it,
+  # not the per-index one, which is precisely what invariant 5 forbids. Two shards
+  # failing twice (4 > 3) would have killed the healthy third.
+  # A constant, not arithmetic: the value is substituted by four different renderers
+  # and none of them can do sums. It only has to exceed indexes x 2 for every
+  # fan-out this design permits (verify's ceiling is max_parallelism = 100).
+  backoffLimit: 10000
   template:
     spec:
       runtimeClassName: gvisor
@@ -152,9 +162,25 @@ spec:
               CM_RC=0
               cm find __SCOPE__ --sandbox=false -y --bypass-warning > /tmp/f 2>&1 || CM_RC=$?
               echo "cm find exit=$CM_RC ($(wc -l < /tmp/f 2>/dev/null || echo 0) lines)"
-              [ "$CM_RC" != "0" ] && { echo "--- cm find failed, last 20 lines ---"; tail -20 /tmp/f; }
+              # `if`, NOT `[ ... ] && { ... }`. This is the LAST command in the
+              # script, so its status is the POD's exit status -- and a false `[ ]`
+              # test in an `&&` compound returns 1. Measured 2026-09-03: cm find
+              # succeeded, the test was false, the pod exited 1 and went to Error;
+              # every index was retried and the Job ended BackoffLimitExceeded with
+              # 6 failures, having published three perfectly good shards. The
+              # failure path was inverted too -- a cm that FAILED returned 0 and the
+              # pod reported Completed, which is exactly the "CM found nothing" vs
+              # "CM never ran" confusion the comment above says this block prevents.
+              # On a project where CodeMender was not enabled that produced a ledger
+              # row of shards_completed=3, findings=0, and a merge gate of PASS.
+              if [ "$CM_RC" != "0" ]; then echo "--- cm find failed, last 20 lines ---"; tail -20 /tmp/f; fi
               # publishing is the trap installed above -- it fires here on normal
               # exit and equally on TERM/INT, which is the whole point (invariant 5).
+              # Exit with cm's OWN status. The trap has already published by the time
+              # this is observed, so failing the shard costs no evidence -- it buys
+              # the one retry backoffLimitPerIndex allows, and makes a shard that did
+              # not scan look like a shard that did not scan.
+              exit "$CM_RC"
           resources:
             requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 3Gi}
             limits:   {cpu: "1", memory: 2Gi, ephemeral-storage: 3Gi}
