@@ -43,6 +43,12 @@ enable_pubsub = false
 results_bucket_ttl_days = 14   # find/verify blobs age out
 poc_bucket_ttl_days     = 0    # 0 = keep the PoC corpus forever (invariant 7)
 
+# Whether `terraform destroy` may delete the two buckets while they still hold
+# objects. TRUE suits a disposable lab. SET IT FALSE on any long-lived project:
+# the results bucket holds the ledger and the PoC bucket holds the corpus, and
+# deleting a bucket takes its versions with it.
+# bucket_force_destroy = false
+
 # There is no use_spot_pods knob. Spot preemption failed the verify Job at 3/12
 # completions and a preempted verify pod costs full agent-minutes for no verdict.
 

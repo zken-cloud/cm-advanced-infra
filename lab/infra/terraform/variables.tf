@@ -57,6 +57,27 @@ variable "results_ttl_prefixes" {
     of any repo that goes quiet for results_bucket_ttl_days.
   EOT
 }
+variable "bucket_force_destroy" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Whether `terraform destroy` may delete the results and PoC buckets while they
+    still hold objects.
+
+    TRUE is right for a disposable lab: the teardown in the README is meant to
+    work, and a bucket that refuses to go leaves a project nobody can fully clean
+    up. Back the corpus up first -- the README's teardown says so, and means it.
+
+    SET IT FALSE ON ANY LONG-LIVED PROJECT. The PoC corpus is the highest
+    value-to-effort artifact in this design (invariant 7): every exploit in it cost
+    20-40 agent-minutes to produce and seconds to replay. The ledger lives in the
+    results bucket too. On 2026-09-03 the shared project got Terraform state for the
+    first time, which made `destroy` possible there at all -- and with it, one
+    mistyped command away from taking 26 verified PoCs and the whole finding history
+    with it. Versioning is not a defence: deleting the bucket takes the versions.
+  EOT
+}
+
 variable "poc_bucket_ttl_days" {
   type        = number
   default     = 0
