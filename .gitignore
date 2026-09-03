@@ -1,4 +1,6 @@
 terraform.tfvars
+# written by tf-init.sh; names your project's state bucket
+backend.hcl
 .terraform/
 *.tfstate
 *.tfstate.*

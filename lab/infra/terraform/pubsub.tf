@@ -3,7 +3,7 @@
 resource "google_pubsub_topic" "observations" {
   count      = var.enable_pubsub ? 1 : 0
   name       = "${var.name_prefix}-observations"
-  depends_on = [google_project_service.svc]
+  depends_on = [time_sleep.services_ready]
 }
 resource "google_pubsub_subscription" "ingest" {
   count = var.enable_pubsub ? 1 : 0

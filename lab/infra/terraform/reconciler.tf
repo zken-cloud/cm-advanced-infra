@@ -8,6 +8,7 @@
 resource "google_service_account" "reconciler" {
   account_id   = "${var.name_prefix}-reconciler"
   display_name = "Reconciler: advances scans through the pipeline"
+  depends_on   = [time_sleep.services_ready]
 }
 
 # Writes the ledger, so it needs object admin -- it IS the ingester in this shape.
@@ -131,7 +132,9 @@ resource "google_cloud_run_v2_service" "reconciler" {
 }
 
 # Eventarc's GCS source publishes through Pub/Sub as the storage service agent.
-data "google_storage_project_service_account" "gcs" {}
+data "google_storage_project_service_account" "gcs" {
+  depends_on = [time_sleep.services_ready]
+}
 
 resource "google_project_iam_member" "gcs_pubsub_publisher" {
   project = var.project_id
@@ -142,6 +145,7 @@ resource "google_project_iam_member" "gcs_pubsub_publisher" {
 resource "google_service_account" "eventarc" {
   account_id   = "${var.name_prefix}-eventarc"
   display_name = "Eventarc trigger identity"
+  depends_on   = [time_sleep.services_ready]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "eventarc_invoke" {
@@ -202,6 +206,7 @@ resource "google_eventarc_trigger" "results_written" {
 resource "google_service_account" "scheduler" {
   account_id   = "${var.name_prefix}-scheduler"
   display_name = "Reconciler backstop: wakes the reconciler on a slow timer"
+  depends_on   = [time_sleep.services_ready]
 }
 
 # The ONLY right this identity has. It cannot read the ledger, touch the cluster,
@@ -238,5 +243,5 @@ resource "google_cloud_scheduler_job" "reconcile_backstop" {
       audience              = google_cloud_run_v2_service.reconciler.uri
     }
   }
-  depends_on = [google_project_service.svc]
+  depends_on = [time_sleep.services_ready]
 }

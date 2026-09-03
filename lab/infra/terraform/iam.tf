@@ -3,14 +3,17 @@
 resource "google_service_account" "runner" {
   account_id   = "${var.name_prefix}-runner"
   display_name = "CodeMender runner (WIF): Vertex + publish-only"
+  depends_on   = [time_sleep.services_ready]
 }
 resource "google_service_account" "ingester" {
   account_id   = "${var.name_prefix}-ingester"
   display_name = "Ledger ingester: sole writer"
+  depends_on   = [time_sleep.services_ready]
 }
 resource "google_service_account" "gate" {
   account_id   = "${var.name_prefix}-gate"
   display_name = "Merge/release gate: read-only ledger"
+  depends_on   = [time_sleep.services_ready]
 }
 
 # --- runner: reach the model, publish results, never read the ledger ---

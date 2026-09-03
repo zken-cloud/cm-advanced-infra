@@ -62,7 +62,7 @@ git clone https://github.com/zken-cloud/cm-advanced-infra.git
 cd cm-advanced-infra
 cp terraform.tfvars.example terraform.tfvars     # project_id, github_owner, iap_ssh_members
 export TF_VAR_github_token=ghp_xxxxxxxx          # the ENVIRONMENT, never the file
-terraform init && terraform apply
+./tf-init.sh && terraform apply                  # NOT bare `terraform init`
 ```
 
 Apply takes about three minutes. The VM then works for another fifteen to
@@ -79,6 +79,46 @@ gcloud compute ssh cm-lab-vm --zone us-central1-a --tunnel-through-iap \
 > **Keep the PAT out of `terraform.tfvars`.** A token in a file is a token in
 > your shell history and eventually in a commit. It still lands in
 > `terraform.tfstate`, so treat that as a secret too — it is gitignored here.
+
+### If apply fails on `already exists`
+
+```
+409 Service account cm-lab-vm already exists within project ...
+409 Your previous request to create the named bucket succeeded and you already own it
+422 Repository creation failed. name already exists on this account
+```
+
+Nothing is wrong with those resources. Terraform is declarative over **its own
+state**, not over the project, so a resource that exists but is not in state is
+one it believes it must create — and the API refuses.
+
+This module keeps **local state**, so its state is bound to the directory you
+ran from. Applying the same project from a fresh clone, a second working copy or
+a new machine gives you an empty state and this error on every resource at once.
+
+`./tf-adopt.sh` imports what already exists and leaves the rest for apply:
+
+`./tf-init.sh` is what stops this happening. It replaces `terraform init`:
+it creates the state bucket, points the backend at it, migrates any local state
+it finds, and then runs `./tf-adopt.sh` to import anything that already exists.
+
+```bash
+./tf-init.sh           # state bucket + GCS backend + adopt what exists
+terraform apply
+```
+
+Both scripts are idempotent and safe on a completely fresh project, where they
+adopt nothing. Neither creates, modifies or deletes a cloud resource other than
+the state bucket — `terraform import` only writes state. Run `terraform plan`
+afterwards and check it says `0 to destroy` before you apply.
+
+`tf-init.sh` refuses to run when state exists **both** in GCS and in a local
+`terraform.tfstate`, rather than guessing which one you meant. Keep one and
+re-run it.
+
+**Do not run bare `terraform init`.** The backend is a partial config — the
+bucket name contains your project id, and a backend block cannot use variables —
+so plain `init` will stop and ask you for the bucket interactively.
 
 ## What it builds
 
@@ -125,8 +165,10 @@ gcloud storage cp -r "gs://$PROJECT-cm-lab-poc/poc" ./poc-corpus-backup
 Step 2 ends with two errors, and both are the guardrails working, not failures:
 deleting the repo needs `delete_repo` scope, which the lab deliberately does not
 ask for (`403 Must have admin rights to Repository`), and the state bucket refuses
-to delete without `force_destroy`. Remove both by hand if you actually want them
-gone. **Revoke the PAT** — a third copy lives in Secret Manager so pods can clone,
+to delete without `force_destroy` — it is non-empty because **this module's own
+state is inside it**, along with the cluster half's. Remove both by hand if you
+actually want them gone, and do the bucket **last**: deleting it is deleting the
+record of everything you just destroyed. **Revoke the PAT** — a third copy lives in Secret Manager so pods can clone,
 and it outlives your shell.
 
 ## Licence

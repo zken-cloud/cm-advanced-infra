@@ -12,18 +12,45 @@
 # ---------------------------------------------------------------------------
 
 locals {
+  # Enabled FIRST. Nothing else in this module may touch a Google API until
+  # time_sleep.services_ready below has passed.
+  #
+  # depends_on = [google_project_service.svc] is NOT sufficient and was measured
+  # not to be: a resource carrying exactly that still died on
+  #   403 SERVICE_DISABLED -- Secret Manager API has not been used in project
+  #   <p> before or it is disabled
+  # The enable operation returns before the service is serving, so ordering
+  # against the enable is not ordering against the API being usable.
+  #
+  # The list is deliberately wider than what this module creates. The VM applies
+  # lab/infra/terraform minutes later; every service enabled here is a
+  # propagation window that has already closed by the time that apply runs. Both
+  # configs set disable_on_destroy = false, so declaring a service in both is
+  # idempotent -- unlike the Artifact Registry repository, an enabled API is not
+  # a resource a destroy in one state can take away from the other.
   services = [
+    "serviceusage.googleapis.com", # enabling anything at all
+    "cloudresourcemanager.googleapis.com",
     "compute.googleapis.com", # creates the default compute SA that Cloud Build runs as
+    "oslogin.googleapis.com", # roles/compute.osAdminLogin has nothing to act on otherwise
     "iap.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com", # WIF token exchange
     "sts.googleapis.com",
-    "cloudresourcemanager.googleapis.com",
+    "storage.googleapis.com",    # the tfstate bucket here, results + poc later
+    "logging.googleapis.com",    # roles/logging.logWriter has nowhere to write otherwise
     "aiplatform.googleapis.com", # cm calls Vertex as the VM's ADC identity
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "secretmanager.googleapis.com",
     "container.googleapis.com",
+    # Below here: not used by THIS module. Front-loaded for the VM's apply of
+    # lab/infra/terraform, per the note above.
+    "pubsub.googleapis.com",
+    "run.googleapis.com",
+    "eventarc.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "bigquery.googleapis.com",
   ]
   repo_full = "${var.github_owner}/${var.lab_repo_name}"
 }
@@ -32,6 +59,27 @@ resource "google_project_service" "svc" {
   for_each           = toset(local.services)
   service            = each.value
   disable_on_destroy = false
+}
+
+# THE barrier. A service-enable API call returns before the service is actually
+# serving, and depends_on cannot express "and is now serving" -- so this waits,
+# and everything downstream orders against this rather than against svc.
+#
+# Measured on a cold project: terraform enabled iam.googleapis.com, waited for the
+# operation, and the very next resource died on
+#   403 Permission 'iam.workloadIdentityPools.create' denied
+# A second `terraform apply` then converged with no changes to the config -- the
+# classic signature of enablement lag, not of a missing permission.
+#
+# 120s rather than 60s. That is a margin, not a measurement: the slowest thing
+# gated here is the default compute service account, which compute.googleapis.com
+# creates asynchronously some time after its own enable returns. It costs 120s on
+# every apply, including ones that would not have raced. That is the right trade
+# for the FIRST command of the lab: a hard 403 there is indistinguishable, to a
+# participant, from a broken PAT or a wrong project.
+resource "time_sleep" "services_ready" {
+  depends_on      = [google_project_service.svc]
+  create_duration = "120s"
 }
 
 # ---------------------------------------------------------------------------
@@ -44,7 +92,7 @@ resource "google_project_service" "svc" {
 resource "google_service_account" "vm" {
   account_id   = "${var.name_prefix}-vm"
   display_name = "CodeMender lab VM"
-  depends_on   = [google_project_service.svc]
+  depends_on   = [time_sleep.services_ready]
 }
 
 resource "google_project_iam_member" "vm" {
@@ -104,8 +152,20 @@ resource "google_project_iam_member" "cloudbuild_default" {
   role    = each.value
   member  = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
 
-  # The account only exists once compute.googleapis.com is on.
-  depends_on = [google_project_service.svc]
+  # The barrier, not depends_on = [google_project_service.svc], is what makes this
+  # safe. Enabling compute.googleapis.com is what CREATES this account and it does
+  # so asynchronously after the enable returns, so the original ordering produced
+  #   400 Service account ...-compute@developer.gserviceaccount.com does not exist
+  # which reads like a wrong address and was a race.
+  #
+  # This was briefly a data.google_compute_default_service_account, which is the
+  # more honest way to say "wait for the account". Reverted: a data source is read
+  # during plan AND during `terraform import`, so on a project where compute is not
+  # yet enabled it 403s and takes every unrelated import down with it -- measured
+  # on cm-advanced-lab-zken1, where tf-init.sh created the state bucket and
+  # tf-adopt.sh could then not adopt it, leaving apply to 409 on the bucket. That
+  # is the greenfield path, which is the one path that must work.
+  depends_on = [time_sleep.services_ready]
 }
 
 # ---------------------------------------------------------------------------
@@ -121,22 +181,6 @@ resource "google_project_iam_member" "cloudbuild_default" {
 # neither change nor delete.
 # ---------------------------------------------------------------------------
 
-# A service-enable API call returns before the service is actually serving.
-# Measured on a cold project: terraform enabled iam.googleapis.com, waited for the
-# operation, and the very next resource died on
-#   403 Permission 'iam.workloadIdentityPools.create' denied
-# A second `terraform apply` then converged with no changes to the config -- the
-# classic signature of enablement lag, not of a missing permission. depends_on
-# cannot express "and is now serving", so this waits.
-#
-# It costs 60s on every apply, including ones that would not have raced. That is
-# the right trade for the FIRST command of the lab: a hard 403 there is
-# indistinguishable, to a participant, from a broken PAT or a wrong project.
-resource "time_sleep" "services_ready" {
-  depends_on      = [google_project_service.svc]
-  create_duration = "60s"
-}
-
 resource "google_storage_bucket" "tfstate" {
   name                        = "${var.project_id}-${var.name_prefix}-tfstate"
   location                    = var.region
@@ -147,7 +191,7 @@ resource "google_storage_bucket" "tfstate" {
     enabled = true
   }
 
-  depends_on = [google_project_service.svc]
+  depends_on = [time_sleep.services_ready]
 }
 
 # ---------------------------------------------------------------------------
@@ -159,7 +203,7 @@ resource "google_storage_bucket" "tfstate" {
 resource "google_compute_network" "vpc" {
   name                    = "${var.name_prefix}-qs-net"
   auto_create_subnetworks = false
-  depends_on              = [google_project_service.svc]
+  depends_on              = [time_sleep.services_ready]
 }
 
 resource "google_compute_subnetwork" "subnet" {
@@ -213,6 +257,8 @@ resource "google_project_iam_member" "iap_tunnel" {
   project  = var.project_id
   role     = "roles/iap.tunnelResourceAccessor"
   member   = each.value
+
+  depends_on = [time_sleep.services_ready]
 }
 
 resource "google_project_iam_member" "os_login" {
@@ -220,4 +266,6 @@ resource "google_project_iam_member" "os_login" {
   project  = var.project_id
   role     = "roles/compute.osAdminLogin"
   member   = each.value
+
+  depends_on = [time_sleep.services_ready]
 }

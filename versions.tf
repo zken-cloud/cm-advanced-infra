@@ -1,5 +1,11 @@
 terraform {
   required_version = ">= 1.5"
+
+  # Partial config -- the bucket name contains the project id, and a backend block
+  # cannot use variables. ./tf-init.sh creates the bucket and supplies the rest
+  # via backend.hcl. Do NOT run bare `terraform init`; it will ask you for these.
+  backend "gcs" {}
+
   required_providers {
     google = { source = "hashicorp/google", version = "~> 6.0" }
     github = { source = "integrations/github", version = "~> 6.0" }

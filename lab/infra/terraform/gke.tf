@@ -36,7 +36,7 @@
 resource "google_compute_network" "vpc" {
   name                    = "${var.name_prefix}-net"
   auto_create_subnetworks = false
-  depends_on              = [google_project_service.svc]
+  depends_on              = [time_sleep.services_ready]
 }
 
 resource "google_compute_subnetwork" "subnet" {
@@ -104,7 +104,7 @@ resource "google_container_cluster" "cluster" {
     enable_private_nodes    = true
     enable_private_endpoint = false
   }
-  depends_on = [google_compute_router_nat.nat, google_project_service.svc]
+  depends_on = [google_compute_router_nat.nat, time_sleep.services_ready]
   ip_allocation_policy {
     cluster_secondary_range_name  = "pods"
     services_secondary_range_name = "services"
