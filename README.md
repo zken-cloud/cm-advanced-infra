@@ -80,6 +80,38 @@ gcloud compute ssh cm-lab-vm --zone us-central1-a --tunnel-through-iap \
 > your shell history and eventually in a commit. It still lands in
 > `terraform.tfstate`, so treat that as a secret too — it is gitignored here.
 
+### If apply fails on `already exists`
+
+```
+409 Service account cm-lab-vm already exists within project ...
+409 Your previous request to create the named bucket succeeded and you already own it
+422 Repository creation failed. name already exists on this account
+```
+
+Nothing is wrong with those resources. Terraform is declarative over **its own
+state**, not over the project, so a resource that exists but is not in state is
+one it believes it must create — and the API refuses.
+
+This module keeps **local state**, so its state is bound to the directory you
+ran from. Applying the same project from a fresh clone, a second working copy or
+a new machine gives you an empty state and this error on every resource at once.
+
+`./tf-adopt.sh` imports what already exists and leaves the rest for apply:
+
+```bash
+terraform init
+./tf-adopt.sh          # adopts pre-existing resources into state
+terraform apply
+```
+
+It is idempotent, safe on a completely fresh project (it adopts nothing), and
+never creates, modifies or deletes a cloud resource — `terraform import` only
+writes local state. Run `terraform plan` afterwards and check it says
+`0 to destroy` before you apply.
+
+The durable fix is a remote backend for this module, the way the cluster half
+already has one. Until then, keep `terraform.tfstate` and run from one place.
+
 ## What it builds
 
 - **VM** — Debian 12, `n2-standard-8`, 100 GB, no external IP, Shielded VM on,
