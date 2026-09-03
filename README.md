@@ -99,15 +99,35 @@ gcloud compute ssh cm-lab-vm --zone us-central1-a --tunnel-through-iap \
 
 ## Teardown
 
+**Two states, and the order matters.** The terraform at this root owns the VM, the
+network, IAP, WIF and the secret. It does **not** own the GKE cluster, the results
+and PoC buckets, BigQuery, the Cloud Run reconciler, the Eventarc trigger or the
+Cloud Scheduler job — `lab/infra/terraform` owns those, and the VM applied it. So
+destroying this root first deletes the machine the other state was applied from and
+strands everything above it, still billing, behind a teardown that reported success.
+
 ```bash
+# 1. ON THE VM — the cluster half, first
+gcloud compute ssh cm-lab-vm --zone us-central1-a --tunnel-through-iap --project "$PROJECT"
+cd /opt/cm-lab-payload/lab/infra/terraform && sudo terraform destroy
+
+# 2. ON YOUR MACHINE — then this root: VM, IAP path, NAT, WIF, secret
 terraform destroy
 ```
 
-Two errors here are the guardrails working, not failures: deleting the repo
-needs `delete_repo` scope, which the lab deliberately does not ask for, and the
-state bucket refuses to delete without `force_destroy`. Remove both by hand if
-you actually want them gone. **Revoke the PAT** — a third copy lives in Secret
-Manager so pods can clone, and it outlives your shell.
+Back up anything you want to keep **before** step 1 — the PoC corpus especially,
+which is the one artifact here that cost agent-minutes to produce:
+
+```bash
+gcloud storage cp -r "gs://$PROJECT-cm-lab-poc/poc" ./poc-corpus-backup
+```
+
+Step 2 ends with two errors, and both are the guardrails working, not failures:
+deleting the repo needs `delete_repo` scope, which the lab deliberately does not
+ask for (`403 Must have admin rights to Repository`), and the state bucket refuses
+to delete without `force_destroy`. Remove both by hand if you actually want them
+gone. **Revoke the PAT** — a third copy lives in Secret Manager so pods can clone,
+and it outlives your shell.
 
 ## Licence
 

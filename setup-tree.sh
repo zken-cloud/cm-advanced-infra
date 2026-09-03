@@ -123,7 +123,16 @@ run git -C "$H/cm-lab" add -A
 # without a detour into git config.
 run git config --global user.email "$U@cm-lab"
 run git config --global user.name "$U"
-run git -C "$H/cm-lab" commit -q -m "add the cm pipeline"
+# `[skip ci]` IS LOAD-BEARING. This push lands on main, and cm-fanout.yml triggers
+# on main -- but this runs at 0f/2, and cm-lab-runner is not created until the
+# cluster half applies at 0e, ten to twenty minutes later. So the very first
+# workflow run of every new lab failed, every time, and the participant's first
+# sight of their own repository was a red X. Measured 2026-09-03 on a clean
+# project: run failed 13s in at get-gke-credentials with
+#   not found; Gaia id not found for email cm-lab-runner@<project>...
+# Nothing is lost by skipping it: this is the seed commit, not a developer's, and
+# the run the fan-out exists to serve is the one the participant pushes at Step 4.
+run git -C "$H/cm-lab" commit -q -m "add the cm pipeline [skip ci]"
 # On main, before any branch is cut: this is what makes cm-fanout fire at all, and
 # what Step 3's `cm vcs reset` will otherwise delete as untracked.
 run git -C "$H/cm-lab" push -q origin HEAD:main || echo "WARN: push failed; push ~/cm-lab before Step 4"

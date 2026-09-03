@@ -48,10 +48,28 @@ render /tmp/find-job.yaml \
   -e "s#__SCOPE__#$SCOPE#g" -e "s#__SHA__#$SHA#g" -e "s#__PROJECT__#$PROJECT#g" \
   "$(dirname "$0")/51-find-job.yaml"
 kubectl -n $NS apply -f /tmp/find-job.yaml
-kubectl -n $NS wait --for=condition=complete job/cm-find --timeout=600s
+# A CEILING, NOT A CONTRACT -- the same reasoning PHASE 2's wait already carried,
+# which this line did not. Under `set -e` a bare `kubectl wait` that times out
+# ABORTS THE WHOLE SCRIPT, so a find whose shards had already landed in GCS was
+# never folded, never selected and never ingested. Measured 2026-09-03: the wait
+# expired at 600s, the script died, and all three shards were sitting in
+# find/$SHA/ complete and untouched. The pods publish on every exit path
+# (invariant 5), so giving up on the WAIT must never mean giving up on the
+# RESULTS -- PHASE 1.5 counts what actually landed and warns if it is partial.
+#
+# 600s was also simply too short: observed find durations in this cluster run
+# 4m39s-7m18s, and a cold Autopilot scale-up adds two to three minutes on top.
+FIND_WAIT="${FIND_WAIT:-1800}"
+kubectl -n $NS wait --for=condition=complete job/cm-find --timeout=${FIND_WAIT}s || \
+  kubectl -n $NS wait --for=condition=failed job/cm-find --timeout=10s || \
+  echo "  find Job did not reach a terminal condition in ${FIND_WAIT}s -- collecting whatever landed"
 
 echo "PHASE 1.5: consolidate + dedup + ledger-suppress"
-mkdir -p /tmp/tp && rm -f /tmp/tp/*.db /tmp/tp/scrub-*.json
+# `*.db` alone leaves *.db-wal and *.db-shm behind, and sqlite will happily pick up
+# a sidecar belonging to a DIFFERENT database on the next run. Observed 2026-09-03:
+# Aug-30 sidecars sitting next to freshly downloaded Sep-03 shards.
+mkdir -p /tmp/tp && rm -f /tmp/tp/*.db /tmp/tp/*.db-wal /tmp/tp/*.db-shm \
+                         /tmp/tp/scrub-*.json /tmp/tp/coverage-*.json
 for i in $(seq 0 $((SHARDS-1))); do
   gsutil cp "gs://$BUCKET/find/$SHA/$i.db" "/tmp/tp/$i.db" || true
   gsutil cp "gs://$BUCKET/find/$SHA/scrub-$i.json" "/tmp/tp/scrub-$i.json" || true

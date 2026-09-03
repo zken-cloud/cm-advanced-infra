@@ -26,7 +26,12 @@ spec:
   ttlSecondsAfterFinished: 3600
   backoffLimitPerIndex: 1
   maxFailedIndexes: __N__
-  backoffLimit: __N__
+  # See 51-find-job.yaml: backoffLimit counts POD failures, so `__N__` is half the
+  # reachable maximum of __N__ x (backoffLimitPerIndex + 1). This Job has the larger
+  # exposure of the two -- a 20-pod fan-out could reach 40 failures against a budget
+  # of 20 -- and the siblings it would terminate are mid-verify, each holding
+  # 20-40 agent-minutes of work that publishes nothing if killed.
+  backoffLimit: 10000
   template:
     spec:
       runtimeClassName: gvisor
