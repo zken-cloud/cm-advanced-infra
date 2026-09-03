@@ -52,15 +52,29 @@ CFG=$(echo 'jsonencode({project = var.project_id, region = var.region, zone = va
 # the `||` above never fires and the parse below dies on an empty string.
 [ -n "$CFG" ] || { echo "terraform console returned nothing; run 'terraform validate'" >&2; exit 1; }
 
+# Once state is in GCS, console prints "Acquiring state lock..." on STDOUT ahead
+# of the value, so the payload is not the whole output and not necessarily the
+# first line. Take the first line that parses; do not assume a position.
 eval "$(python3 - "$CFG" <<'PY'
 import json, shlex, sys
-c = json.loads(json.loads(sys.argv[1]))
+c = None
+for line in sys.argv[1].splitlines():
+    try:
+        v = json.loads(line.strip())
+        c = json.loads(v) if isinstance(v, str) else v
+        if isinstance(c, dict) and "project" in c:
+            break
+        c = None
+    except (ValueError, TypeError):
+        continue
+if c is None:
+    sys.exit("could not parse terraform console output:\n" + sys.argv[1][:400])
 for k in ("project", "region", "zone", "prefix", "repo", "pool"):
     print(f"{k.upper()}={shlex.quote(c[k])}")
 print(f"CREATE_POOL={str(c['create_pool']).lower()}")
 print(f"SERVICES={shlex.quote(' '.join(c['services']))}")
 PY
-)"
+)" || { echo "failed to read config from terraform console" >&2; exit 1; }
 
 STATE=$(terraform state list 2>/dev/null)
 adopted=0 skipped=0 absent=0

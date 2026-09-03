@@ -150,17 +150,21 @@ resource "google_project_iam_member" "cloudbuild_default" {
   ])
   project = var.project_id
   role    = each.value
-  member  = "serviceAccount:${data.google_compute_default_service_account.default.email}"
-}
+  member  = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
 
-# Constructed as "${data.google_project.this.number}-compute@developer..." this
-# failed with
-#   400 Service account ...-compute@developer.gserviceaccount.com does not exist
-# which reads like a wrong address and is a race: enabling compute.googleapis.com
-# is what creates the account, and it does so asynchronously AFTER the enable
-# returns. Reading the account instead of spelling it makes the dependency real
-# and the failure honest -- if it is genuinely absent, the error names that.
-data "google_compute_default_service_account" "default" {
+  # The barrier, not depends_on = [google_project_service.svc], is what makes this
+  # safe. Enabling compute.googleapis.com is what CREATES this account and it does
+  # so asynchronously after the enable returns, so the original ordering produced
+  #   400 Service account ...-compute@developer.gserviceaccount.com does not exist
+  # which reads like a wrong address and was a race.
+  #
+  # This was briefly a data.google_compute_default_service_account, which is the
+  # more honest way to say "wait for the account". Reverted: a data source is read
+  # during plan AND during `terraform import`, so on a project where compute is not
+  # yet enabled it 403s and takes every unrelated import down with it -- measured
+  # on cm-advanced-lab-zken1, where tf-init.sh created the state bucket and
+  # tf-adopt.sh could then not adopt it, leaving apply to 409 on the bucket. That
+  # is the greenfield path, which is the one path that must work.
   depends_on = [time_sleep.services_ready]
 }
 

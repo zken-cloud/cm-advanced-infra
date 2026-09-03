@@ -62,7 +62,7 @@ git clone https://github.com/zken-cloud/cm-advanced-infra.git
 cd cm-advanced-infra
 cp terraform.tfvars.example terraform.tfvars     # project_id, github_owner, iap_ssh_members
 export TF_VAR_github_token=ghp_xxxxxxxx          # the ENVIRONMENT, never the file
-terraform init && terraform apply
+./tf-init.sh && terraform apply                  # NOT bare `terraform init`
 ```
 
 Apply takes about three minutes. The VM then works for another fifteen to
@@ -98,19 +98,27 @@ a new machine gives you an empty state and this error on every resource at once.
 
 `./tf-adopt.sh` imports what already exists and leaves the rest for apply:
 
+`./tf-init.sh` is what stops this happening. It replaces `terraform init`:
+it creates the state bucket, points the backend at it, migrates any local state
+it finds, and then runs `./tf-adopt.sh` to import anything that already exists.
+
 ```bash
-terraform init
-./tf-adopt.sh          # adopts pre-existing resources into state
+./tf-init.sh           # state bucket + GCS backend + adopt what exists
 terraform apply
 ```
 
-It is idempotent, safe on a completely fresh project (it adopts nothing), and
-never creates, modifies or deletes a cloud resource — `terraform import` only
-writes local state. Run `terraform plan` afterwards and check it says
-`0 to destroy` before you apply.
+Both scripts are idempotent and safe on a completely fresh project, where they
+adopt nothing. Neither creates, modifies or deletes a cloud resource other than
+the state bucket — `terraform import` only writes state. Run `terraform plan`
+afterwards and check it says `0 to destroy` before you apply.
 
-The durable fix is a remote backend for this module, the way the cluster half
-already has one. Until then, keep `terraform.tfstate` and run from one place.
+`tf-init.sh` refuses to run when state exists **both** in GCS and in a local
+`terraform.tfstate`, rather than guessing which one you meant. Keep one and
+re-run it.
+
+**Do not run bare `terraform init`.** The backend is a partial config — the
+bucket name contains your project id, and a backend block cannot use variables —
+so plain `init` will stop and ask you for the bucket interactively.
 
 ## What it builds
 
@@ -157,8 +165,10 @@ gcloud storage cp -r "gs://$PROJECT-cm-lab-poc/poc" ./poc-corpus-backup
 Step 2 ends with two errors, and both are the guardrails working, not failures:
 deleting the repo needs `delete_repo` scope, which the lab deliberately does not
 ask for (`403 Must have admin rights to Repository`), and the state bucket refuses
-to delete without `force_destroy`. Remove both by hand if you actually want them
-gone. **Revoke the PAT** — a third copy lives in Secret Manager so pods can clone,
+to delete without `force_destroy` — it is non-empty because **this module's own
+state is inside it**, along with the cluster half's. Remove both by hand if you
+actually want them gone, and do the bucket **last**: deleting it is deleting the
+record of everything you just destroyed. **Revoke the PAT** — a third copy lives in Secret Manager so pods can clone,
 and it outlives your shell.
 
 ## Licence
