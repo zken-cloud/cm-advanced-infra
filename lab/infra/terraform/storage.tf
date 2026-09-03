@@ -4,6 +4,7 @@ resource "google_storage_bucket" "results" {
   location                    = var.region
   force_destroy               = var.bucket_force_destroy
   uniform_bucket_level_access = true
+  depends_on                  = [time_sleep.services_ready]
   # NOT conditional. The ledger is a single object rewritten by every run, and
   # versioning is the only undo it has -- the difference between a bad fold
   # being recoverable and being the new truth. It was declared conditionally,
@@ -35,6 +36,7 @@ resource "google_storage_bucket" "poc" {
   location                    = var.region
   force_destroy               = var.bucket_force_destroy
   uniform_bucket_level_access = true
+  depends_on                  = [time_sleep.services_ready]
   dynamic "lifecycle_rule" {
     for_each = var.poc_bucket_ttl_days > 0 ? [1] : []
     content {

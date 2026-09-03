@@ -12,6 +12,8 @@ resource "google_bigquery_dataset" "warehouse" {
   location                   = var.bq_location
   description                = "Snapshot exports of the CM ledger. Read-only analytics; the merge gate never queries this."
   delete_contents_on_destroy = true
+
+  depends_on = [time_sleep.services_ready]
 }
 
 # findings and scans are MUTABLE in the ledger -- verdicts fold upward, fixed_at

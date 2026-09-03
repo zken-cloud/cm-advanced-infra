@@ -88,7 +88,7 @@ resource "google_secret_manager_secret" "gh_token" {
   replication {
     auto {}
   }
-  depends_on = [google_project_service.svc]
+  depends_on = [time_sleep.services_ready]
 }
 
 resource "google_secret_manager_secret_version" "gh_token" {
