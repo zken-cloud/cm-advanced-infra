@@ -132,10 +132,50 @@ step "0b/4 codemender CLI (--version=stable)"
 cd /tmp
 gcloud artifacts generic download --project=cmoc-prod --location=us \
   --repository=codemender-cli-production --package=cm --version=stable \
-  --name=cm-linux-amd64.zip --destination=/tmp >/dev/null || die "cm download (is CodeMender enabled on this project?)"
+  --name=cm-linux-amd64.zip --destination=/tmp >/dev/null || die "cm download from cmoc-prod"
 unzip -o -q /tmp/cm-linux-amd64.zip -d /tmp && install -m0755 /tmp/cm /usr/local/bin/cm || die "cm install"
 CM_SHA=$(sha256sum /usr/local/bin/cm | cut -d' ' -f1)
 echo "cm $(/usr/local/bin/cm --version 2>&1 | head -1)  sha256=$CM_SHA"
+# ^ that download proves NOTHING about this project. It reads from cmoc-prod, a
+# public repository, so it succeeds anywhere -- measured on five projects that
+# could not run CodeMender at all, and on a laptop. Its die message used to ask
+# "is CodeMender enabled on this project?", which is the one question it cannot
+# answer and the only place the whole lab appeared to ask it. A step that always
+# passes, phrased as a check, is worse than no check.
+
+step "0b/5 codemender entitlement preflight"
+# THE PREREQUISITE THAT COSTS THE MOST TO GET WRONG, ASKED AT THE CHEAPEST MOMENT.
+#
+# CodeMender is a gated preview: the agent answers only for projects that have
+# been onboarded. Nothing before this point touches it -- apply succeeds, the
+# bootstrap reaches READY, Step 1's semgrep baseline and Step 2's hook both work
+# -- and the first real call is `cm fix` in Step 3, about 22 minutes in. Measured
+# 2026-09-03: four green signals, then a 403, in Part B, for a Part A mistake.
+#
+# README already tells you to check the PAT's scopes "before you spend twenty
+# minutes finding out". This is that check, for the more expensive prerequisite.
+#
+# FAIL-CLOSED ON ONE EXACT SIGNATURE, fail-open on everything else. Only the
+# preview 403 stops the bootstrap; a timeout, a network blip or any other error
+# warns and continues, because a preflight that blocks a working lab is worse
+# than the problem it screens for. A timeout is a PASS: the 403 comes back in
+# under a second, so anything that gets as far as running is past the gate.
+PREFLIGHT_HOME=$(mktemp -d)
+PREFLIGHT_SRC=$(mktemp -d)
+mkdir -p "$PREFLIGHT_SRC/src"
+printf 'const cp=require("child_process");\nmodule.exports=(r)=>cp.exec("ls "+r.query.d);\n' \
+  > "$PREFLIGHT_SRC/src/preflight.js"
+HOME="$PREFLIGHT_HOME" /usr/local/bin/cm init >/dev/null 2>&1 || true
+PREFLIGHT_OUT=$(cd "$PREFLIGHT_SRC" && HOME="$PREFLIGHT_HOME" GOOGLE_CLOUD_PROJECT="$PROJECT" \
+  timeout 90 /usr/local/bin/cm find src --sandbox=false -y --bypass-warning 2>&1 || true)
+rm -rf "$PREFLIGHT_HOME" "$PREFLIGHT_SRC"
+case "$PREFLIGHT_OUT" in
+  *"CodeMender preview"*|*"Unsupported agent interaction"*|*"403 Forbidden"*)
+    echo "$PREFLIGHT_OUT" | tail -8
+    die "project $PROJECT is NOT onboarded to the CodeMender preview -- Part B Step 3 and all of Part C will fail. See https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender/set-up-environment" ;;
+  *)
+    echo "codemender entitlement: ok for $PROJECT" ;;
+esac
 
 step "0f/1 clone the guide @ $${GUIDE_REF}"
 # The token is still read here -- the find pods and the reconciler need it to clone
