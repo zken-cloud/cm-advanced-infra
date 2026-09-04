@@ -72,7 +72,7 @@ spec:
               # pod still knows which fingerprint it was given, and "we started and
               # were killed" is a different fact from silence.
               SHA=__SHA__
-              VERDICT=terminated; TRIED=0; EXPLOIT=0; RESTORED=0; POC_URI=""; FID=""; PUBLISHED=""
+              VERDICT=terminated; TRIED=0; EXPLOIT=0; RESTORED=0; POC_URI=""; FID=""; PUBLISHED=""; SEQ=0
               CWE_CLASS=""; HARNESS="functional-exploit"; NEEDS_ORACLE=0
               ORACLE_RAN=0; ORACLE_POC=""
               publish() {
@@ -80,19 +80,40 @@ spec:
                 # used to be "publish once, first wins", which is exactly wrong when
                 # the first publish came from a trap that fired early: the pod then
                 # reports its pre-loop default forever and silently discards the real
-                # answer it went on to compute. Same object name either way, so a
-                # second write costs one PUT and overwrites in place.
+                # answer it went on to compute (INCIDENTS 9).
+                #
+                # It used to say "same object name either way, so a second write
+                # overwrites in place". IT DOES NOT. This pod holds objectCreator --
+                # invariant 3's publish-only credential -- so writing the same key
+                # twice is refused, measured 2026-09-04 as http=403 on a versioned
+                # bucket. The re-publish that fixes incident 9 could not land, and
+                # the discarded-answer failure it was written to prevent survived
+                # with a 403 in the log instead of a silent guard.
+                #
+                # So a correction goes to a NEW key carrying a higher publish_seq,
+                # and the ingester takes the newest seq per fingerprint. Adding an
+                # object is what this credential is for; replacing one is not.
                 [ "$PUBLISHED" = "$VERDICT" ] && return 0
                 PUBLISHED="$VERDICT"
-                { echo "{\"idx\":$I,\"fingerprint\":\"$FP\",\"finding_id\":\"${FID:-}\",\"canonical_path\":\"$CPATH\",\"verdict\":\"$VERDICT\",\"attempts_tried\":$TRIED,\"attempts_budget\":$ATT,\"exploit_successful\":$EXPLOIT,\"restored\":$RESTORED,\"shard\":\"$SHARD\",\"poc_uri\":\"$POC_URI\",\"proven_sha\":\"$SHA\",\"cwe_class\":\"${CWE_CLASS:-}\",\"harness\":\"${HARNESS:-functional-exploit}\",\"oracle_required\":${NEEDS_ORACLE:-0}}"; } > /tmp/result.json
+                SEQ=$((SEQ+1))
+                { echo "{\"idx\":$I,\"fingerprint\":\"$FP\",\"finding_id\":\"${FID:-}\",\"canonical_path\":\"$CPATH\",\"verdict\":\"$VERDICT\",\"attempts_tried\":$TRIED,\"attempts_budget\":$ATT,\"exploit_successful\":$EXPLOIT,\"restored\":$RESTORED,\"shard\":\"$SHARD\",\"poc_uri\":\"$POC_URI\",\"proven_sha\":\"$SHA\",\"cwe_class\":\"${CWE_CLASS:-}\",\"harness\":\"${HARNESS:-functional-exploit}\",\"oracle_required\":${NEEDS_ORACLE:-0},\"publish_seq\":$SEQ}"; } > /tmp/result.json
                 cat /tmp/result.json
                 # a fresh token: verify runs long enough for the first one to age out
                 TOK=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
                 SAFE=$(echo "$FP" | tr ':/' '__')
-                curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+                # seq 1 keeps the historic name, so nothing that already reads
+                # verify/<sha>/<fp>.json changes. Corrections are additive.
+                if [ "$SEQ" = "1" ]; then OBJ="verify/__SHA__/$SAFE.json"
+                else OBJ="verify/__SHA__/$SAFE.$SEQ.json"; fi
+                VCODE=$(curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
                   --data-binary @/tmp/result.json \
-                  "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&name=verify/__SHA__/$SAFE.json" \
-                  -o /dev/null -w "verify $I published ($VERDICT) http=%{http_code}\n"
+                  "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&ifGenerationMatch=0&name=$OBJ" \
+                  -o /dev/null -w '%{http_code}')
+                case "$VCODE" in
+                  2*)  echo "verify $I published ($VERDICT, seq=$SEQ) http=$VCODE" ;;
+                  412) echo "verify $I: $OBJ already exists -- another attempt of this index published it; keeping theirs (http=412)" ;;
+                  *)   echo "verify $I PUBLISH FAILED ($VERDICT, seq=$SEQ) http=$VCODE" ;;
+                esac
               }
               trap publish EXIT TERM INT
 

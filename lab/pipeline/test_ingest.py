@@ -45,6 +45,52 @@ def t_clean_scan_passes():
         rc,out,_=_run(t,[])
         assert rc==0 and "PASS" in out, out
 
+def t_a_later_publish_seq_supersedes_the_first():
+    """INCIDENTS 9, with the credential taken into account. A verify pod whose trap
+    fired early publishes `terminated`, computes the real answer, and CANNOT
+    overwrite -- objectCreator refuses the second write to the same key. The
+    correction arrives as a separate envelope with a higher publish_seq, and that
+    one is the answer. Ingesting both, or taking the first, re-creates the bug."""
+    with tempfile.TemporaryDirectory() as t:
+        fp=f"{ALGO}:aaaa"
+        rc,out,_=_run(t,[
+            {"fingerprint":fp,"verdict":"terminated","canonical_path":"a.js","publish_seq":1},
+            {"fingerprint":fp,"verdict":"verified","canonical_path":"a.js","publish_seq":2},
+        ],[{"fingerprint":fp,"cwe_class":"ssrf","canonical_path":"a.js","enclosing_function":"f"}])
+        assert "superseded" in out, out
+        assert rc==1 and "BLOCK" in out, out          # the REAL answer gates
+
+def t_the_first_envelope_does_not_supersede_a_later_one():
+    """Order on disk must not decide it. Same pair, written the other way round."""
+    with tempfile.TemporaryDirectory() as t:
+        fp=f"{ALGO}:bbbb"
+        rc,out,_=_run(t,[
+            {"fingerprint":fp,"verdict":"verified","canonical_path":"a.js","publish_seq":2},
+            {"fingerprint":fp,"verdict":"terminated","canonical_path":"a.js","publish_seq":1},
+        ],[{"fingerprint":fp,"cwe_class":"ssrf","canonical_path":"a.js","enclosing_function":"f"}])
+        assert rc==1 and "BLOCK" in out, out
+
+def t_envelopes_with_no_seq_still_ingest():
+    """Everything published before publish_seq existed has no field. It must read as
+    seq 0 and behave exactly as it did, or this change rewrites history."""
+    with tempfile.TemporaryDirectory() as t:
+        fp=f"{ALGO}:cccc"
+        rc,out,_=_run(t,[{"fingerprint":fp,"verdict":"verified","canonical_path":"a.js"}],
+                      [{"fingerprint":fp,"cwe_class":"ssrf","canonical_path":"a.js","enclosing_function":"f"}])
+        assert "superseded" not in out, out
+        assert rc==1 and "BLOCK" in out, out
+
+def t_different_fingerprints_never_supersede_each_other():
+    with tempfile.TemporaryDirectory() as t:
+        a,b=f"{ALGO}:dddd",f"{ALGO}:eeee"
+        rc,out,_=_run(t,[
+            {"fingerprint":a,"verdict":"not_exploitable","canonical_path":"a.js","publish_seq":1},
+            {"fingerprint":b,"verdict":"verified","canonical_path":"b.js","publish_seq":1},
+        ],[{"fingerprint":a,"cwe_class":"ssrf","canonical_path":"a.js","enclosing_function":"f"},
+           {"fingerprint":b,"cwe_class":"ssrf","canonical_path":"b.js","enclosing_function":"g"}])
+        assert "superseded" not in out, out
+        assert rc==1 and "BLOCK" in out, out
+
 def t_stale_algo_is_refused():
     with tempfile.TemporaryDirectory() as t:
         rc,out,_=_run(t,[{"fingerprint":"fp1:old","verdict":"verified","canonical_path":"a.js"}])

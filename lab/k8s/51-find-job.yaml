@@ -71,6 +71,30 @@ spec:
               [ "$CM_AGENT_VERSION" = "codemender-" ] && CM_AGENT_VERSION="codemender-unknown"
               echo "agent version: $CM_AGENT_VERSION"
 
+              # One publish, CREATE-ONLY. `ifGenerationMatch=0` makes GCS answer 412 when
+              # the object is already there, instead of the 403 that objectCreator
+              # returns for a refused overwrite. Those are different worlds -- "an
+              # earlier attempt of this index already published" versus "this pod
+              # cannot write at all" -- and before this they were the same line.
+              # Measured 2026-09-04 on a live bucket: create 200, same key again 412.
+              #
+              # First writer wins, deliberately. objectCreator is invariant 3's
+              # publish-only credential: add an object, never replace one. So a retry
+              # recovers a pod that died BEFORE publishing (preemption, the case Q6
+              # buys the retry for) and cannot supersede an attempt that already
+              # published. Q15 tracks whether it should.
+              put() {   # put <label> <content-type> <file> <object-name>
+                _c=$(curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: $2" \
+                  --data-binary @"$3" \
+                  "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&ifGenerationMatch=0&name=$4" \
+                  -o /dev/null -w '%{http_code}')
+                case "$_c" in
+                  2*)  echo "$1 $I published http=$_c" ;;
+                  412) echo "$1 $I already published by an earlier attempt of this index -- kept (http=412)" ;;
+                  *)   echo "$1 $I PUBLISH FAILED http=$_c" ;;
+                esac
+              }
+
               publish() {
                 [ "$PUBLISHED" = "1" ] && return 0
                 PUBLISHED=1
@@ -78,26 +102,17 @@ spec:
                 TOK=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])' 2>/dev/null)
                 if [ -z "${TOK:-}" ]; then echo "find $I: no metadata token — cannot publish"; return 0; fi
                 if [ -s "$HOME/.codemender/state.db" ]; then
-                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/octet-stream' \
-                    --data-binary @$HOME/.codemender/state.db \
-                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/$I.db" \
-                    -o /dev/null -w "find $I published http=%{http_code}\n"
+                  put find application/octet-stream "$HOME/.codemender/state.db" "find/__SHA__/$I.db"
                 else
                   echo "find $I: no state.db to publish — this shard did NOT land"
                 fi
                 # CM's own output. Without this the only record of WHY a shard
                 # produced nothing dies with the container.
                 if [ -s /tmp/f ]; then
-                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: text/plain' \
-                    --data-binary @/tmp/f \
-                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/cm-$I.log" \
-                    -o /dev/null -w "cmlog $I published http=%{http_code}\n"
+                  put cmlog text/plain /tmp/f "find/__SHA__/cm-$I.log"
                 fi
                 if [ -s "$HOME/scrub-$I.json" ]; then
-                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-                    --data-binary @$HOME/scrub-$I.json \
-                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/scrub-$I.json" \
-                    -o /dev/null -w "scrub $I published http=%{http_code}\n"
+                  put scrub application/json "$HOME/scrub-$I.json" "find/__SHA__/scrub-$I.json"
                 fi
                 # COVERAGE (Q13/D55). CM emits none -- `file_hashes` is empty after every
                 # completed scan measured -- so the exporter reconstructs which files were
@@ -114,10 +129,7 @@ spec:
                     --out /tmp/coverage-$I.json > /dev/null 2>&1 || echo "coverage: exporter failed (non-fatal)"
                 fi
                 if [ -s /tmp/coverage-$I.json ]; then
-                  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-                    --data-binary @/tmp/coverage-$I.json \
-                    "https://storage.googleapis.com/upload/storage/v1/b/__BUCKET__/o?uploadType=media&name=find/__SHA__/coverage-$I.json" \
-                    -o /dev/null -w "coverage $I published http=%{http_code}\n"
+                  put coverage application/json /tmp/coverage-$I.json "find/__SHA__/coverage-$I.json"
                 else
                   echo "coverage $I: NOTHING PRODUCED — this sha will be indistinguishable from unscanned"
                 fi

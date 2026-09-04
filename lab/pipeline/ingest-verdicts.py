@@ -72,6 +72,28 @@ def main():
     for pat in a.verdicts:
         files.extend(sorted(glob.glob(pat)) if any(c in pat for c in "*?[") else [pat])
 
+    # A verify pod publishes more than once when its verdict changes -- the trap
+    # fires with the pre-loop default and the real answer is computed after
+    # (INCIDENTS 9). It holds objectCreator, so it CANNOT overwrite the first
+    # envelope; the correction arrives as a separate object with a higher
+    # publish_seq. Newest seq per fingerprint wins. Envelopes written before
+    # publish_seq existed have no field and read as 0, which is exactly right:
+    # any envelope that carries a seq is a later correction of one that does not.
+    newest = {}
+    for f in files:
+        try:
+            fp = json.load(open(f)).get("fingerprint")
+        except Exception:
+            continue                      # the main loop reports it as SKIP
+        if not fp:
+            continue                      # ditto, as "no fingerprint"
+        try:
+            seq = int(json.load(open(f)).get("publish_seq") or 0)
+        except Exception:
+            seq = 0
+        if fp not in newest or seq > newest[fp][0]:
+            newest[fp] = (seq, f)
+
     def _algo(fp): return fp.split(":", 1)[0] if ":" in fp else "?"
     cur_algo = ledger.dedup.FP_ALGO
     mismatched = set()
@@ -85,6 +107,9 @@ def main():
         fp = v.get("fingerprint")
         if not fp:
             print(f"  SKIP {f}: no fingerprint"); continue
+        if newest.get(fp, (0, f))[1] != f:
+            print(f"  superseded {os.path.basename(f)}: a later publish_seq for {fp} "
+                  f"({os.path.basename(newest[fp][1])}) is the answer"); continue
         # An algo bump re-keys every finding (fp2 -> fp3). Ingesting stale-keyed
         # verdicts would quietly create orphan rows the gate can never match, which
         # is exactly the silent cache invalidation the explicit bump exists to

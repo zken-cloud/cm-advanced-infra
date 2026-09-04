@@ -37,6 +37,20 @@ resource "google_storage_bucket" "poc" {
   force_destroy               = var.bucket_force_destroy
   uniform_bucket_level_access = true
   depends_on                  = [time_sleep.services_ready]
+
+  # Same reason the results bucket has it, and a stronger one. The runner holds
+  # objectCreator here so it cannot replace a PoC (invariant 7: the corpus only
+  # grows) -- but nothing stopped an operator, a script or a future role change
+  # from overwriting one, and a PoC is the single artifact that cost 20-40 agent
+  # minutes to produce. force_destroy protects the bucket; only versioning
+  # protects the object.
+  versioning { enabled = true }
+
+  # NOTE, now that versioning is on: a Delete rule removes the LIVE version and
+  # archives it, so enabling this TTL stops the corpus growing without reclaiming
+  # the storage. If you ever want the bytes back, that needs a second rule on
+  # num_newer_versions / days_since_noncurrent_time -- deliberately not added,
+  # because "expire the PoC corpus for good" should be an explicit act.
   dynamic "lifecycle_rule" {
     for_each = var.poc_bucket_ttl_days > 0 ? [1] : []
     content {
