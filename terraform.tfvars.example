@@ -16,7 +16,7 @@
 # Verify before applying:
 #   curl -sI -H "Authorization: token $TF_VAR_github_token" \
 #     https://api.github.com/user | grep -i x-oauth-scopes
-#   terraform init && terraform apply
+#   ./tf-init.sh && terraform apply       # NOT bare `terraform init`
 
 project_id   = "your-gcp-project"        # CodeMender must be enabled on it
 github_owner = "your-github-username"    # your repo is created here
