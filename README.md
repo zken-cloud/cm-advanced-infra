@@ -24,7 +24,7 @@ are not needed to run any of this.
 |---|---|
 | `terraform` | >= 1.5 |
 | `gcloud` | logged in, **including** `gcloud auth application-default login` |
-| GCP project | CodeMender enabled, billing on, you are Owner |
+| GCP project | **onboarded to the CodeMender preview** (see below), billing on, you are Owner |
 | GitHub PAT | classic, scopes **`repo`** and **`workflow`** |
 
 `gcloud auth login` alone is not enough. Terraform reads Application Default
@@ -40,6 +40,40 @@ before you spend twenty minutes finding out:
 curl -sI -H "Authorization: token $TF_VAR_github_token" https://api.github.com/user \
   | grep -i x-oauth-scopes          # must list BOTH repo and workflow
 ```
+
+### Check the CodeMender entitlement too, for the same reason
+
+CodeMender is a **gated preview**. Your project has to be onboarded to it, and
+nothing you can enable, grant or configure substitutes — not the `aiplatform` API,
+not an IAM role. Onboarding is arranged through your GCP contact:
+<https://docs.cloud.google.com/gemini-enterprise-agent-platform/codemender/set-up-environment>
+
+The bootstrap now checks this for you at step `0b/5` and stops there if it fails.
+Run it yourself first if you want the answer in one minute instead of twenty-two —
+no VM, no terraform, no project changes:
+
+```bash
+mkdir -p /tmp/cmcheck                     # --destination must already exist
+gcloud artifacts generic download --project=cmoc-prod --location=us \
+  --repository=codemender-cli-production --package=cm --version=stable \
+  --name=cm-linux-amd64.zip --destination=/tmp/cmcheck
+unzip -oq /tmp/cmcheck/cm-linux-amd64.zip -d /tmp/cmcheck && chmod +x /tmp/cmcheck/cm
+
+mkdir -p /tmp/cmcheck/t/src && cd /tmp/cmcheck/t
+printf 'const cp=require("child_process");\nmodule.exports=(r)=>cp.exec("ls "+r.query.d);\n' > src/x.js
+HOME=/tmp/cmcheck /tmp/cmcheck/cm init
+HOME=/tmp/cmcheck GOOGLE_CLOUD_PROJECT=<your-project> \
+  /tmp/cmcheck/cm find src --sandbox=false -y --bypass-warning
+```
+
+A finding means you are onboarded. `403 Forbidden` with *"Access to the CodeMender
+preview release must be coordinated"* means you are not, and no part of Step 3 or
+Part C will work until you are.
+
+> **Downloading the `cm` binary proves nothing about your project.** It comes from
+> `cmoc-prod`, a public repository, and succeeds anywhere — measured on five
+> projects that could not run CodeMender at all. Only a real `cm find` answers the
+> question, which is why the check above runs one.
 
 ## Layout
 
