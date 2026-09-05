@@ -76,6 +76,21 @@ def exists(uri):
     return sh("gcloud", "storage", "objects", "describe", uri).returncode == 0
 
 
+
+def verdict_object_fp(name):
+    """The fingerprint a verify verdict object belongs to.
+
+    `<safe-fp>.json` is the first publish; `<safe-fp>.<seq>.json` is a correction
+    from the same pod (INCIDENTS 9 -- it cannot overwrite the first). Both name the
+    same finding, so anything counting verdicts must collapse them. safe-fp is the
+    fingerprint with ':' and '/' mapped to '_', so it never contains a dot and this
+    split is unambiguous.
+    """
+    base = name[:-5] if name.endswith(".json") else name
+    head, sep, tail = base.rpartition(".")
+    return head if sep and tail.isdigit() else base
+
+
 class Reconciler:
     def __init__(self, bucket, ns, namespace_job_prefix="cm-verify", dry_run=False):
         self.bucket, self.ns, self.pfx, self.dry = bucket, ns, namespace_job_prefix, dry_run
@@ -269,9 +284,18 @@ class Reconciler:
         return len(d) if d else 0
 
     def verdicts_landed(self, sha):
-        """How many verdicts this commit's verify pods actually published."""
+        """How many DISTINCT fingerprints this commit's verify pods published a
+        verdict for. Objects, not fingerprints, was wrong the moment a pod could
+        publish twice: a corrected verdict lands as <fp>.<seq>.json alongside
+        <fp>.json (it cannot overwrite -- objectCreator), so counting objects
+        reports one extra and `have < want` stops being true one fingerprint early.
+        The re-dispatch that should have covered the missing one is then skipped and
+        the fold proceeds without it, which is exactly the "ask what landed" control
+        below failing while looking like it worked."""
         r = sh("gcloud", "storage", "ls", f"gs://{self.bucket}/verify/{sha}/")
-        return sum(1 for ln in (r.stdout or "").splitlines() if ln.strip().endswith(".json"))
+        return len({verdict_object_fp(ln.strip().rsplit("/", 1)[-1])
+                    for ln in (r.stdout or "").splitlines()
+                    if ln.strip().endswith(".json")})
 
     def redispatch(self, run, want):
         sha = run["sha"]
@@ -290,7 +314,7 @@ class Reconciler:
         sha, repo = run["sha"], run["repo"]
         work = tempfile.mkdtemp(prefix=f"vf-{sha[:7]}-")
         sh("gcloud", "storage", "cp", f"gs://{self.bucket}/verify/{sha}/*.json", work + "/")
-        got = [f for f in os.listdir(work) if f.endswith(".json")]
+        got = {verdict_object_fp(f) for f in os.listdir(work) if f.endswith(".json")}
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as t:
             pass
         sh("gcloud", "storage", "cp", f"gs://{self.bucket}/find/{sha}/dispatch.json", t.name)
