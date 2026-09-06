@@ -77,6 +77,12 @@ def exists(uri):
 
 
 
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    "shardnames", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shardnames.py"))
+shardnames = _ilu.module_from_spec(_spec); _spec.loader.exec_module(shardnames)
+
+
 def verdict_object_fp(name):
     """The fingerprint a verify verdict object belongs to.
 
@@ -109,7 +115,13 @@ class Reconciler:
         return out
 
     def shards_landed(self, sha):
-        return len([u for u in ls(f"gs://{self.bucket}/find/{sha}/") if u.endswith(".db")])
+        """DISTINCT shards, not objects. A retry publishes `<idx>.2.db` alongside
+        `<idx>.db` because it cannot overwrite (Q15), so counting objects turns a
+        3-shard fan-out with one retry into 4 -- and this number is `shards_completed`,
+        which the merge gate reads. That is INCIDENTS 11 inverted: over-counting into
+        a PASS rather than under-reading into a RACE."""
+        return shardnames.distinct_shards(
+            [u for u in ls(f"gs://{self.bucket}/find/{sha}/") if u.endswith(".db")])
 
     def scan_recorded(self, ledger, repo, sha):
         import sqlite3
@@ -183,8 +195,16 @@ class Reconciler:
         # point of the table is that silence about coverage is itself the bug.
         covdir = os.path.join(work, "cov"); os.makedirs(covdir, exist_ok=True)
         sh("gcloud", "storage", "cp", f"gs://{self.bucket}/find/{sha}/coverage-*.json", covdir + "/")
-        covs = [os.path.join(covdir, f) for f in sorted(os.listdir(covdir)) if f.endswith(".json")]
-        dbs = [os.path.join(work, f) for f in sorted(os.listdir(work)) if f.endswith(".db")]
+        # Newest attempt per shard here too. Two envelopes for shard 0 would have the
+        # ingester's `max(files_observed)` read a retry's success and a first
+        # attempt's zero as one scan -- which is right by luck, not by construction.
+        covs = [os.path.join(covdir, f) for f in
+                shardnames.newest([f for f in sorted(os.listdir(covdir)) if f.endswith(".json")])]
+        # NEWEST attempt per shard. Feeding both `0.db` and `0.2.db` to the dedup
+        # counts one shard's findings twice, which inflates exactly the cross-shard
+        # agreement K-replication is measured by (Q15).
+        dbs = [os.path.join(work, f) for f in
+               shardnames.newest([f for f in sorted(os.listdir(work)) if f.endswith(".db")])]
         if not dbs:
             return f"no shard databases downloaded for {sha[:7]}"
         try:
@@ -324,7 +344,8 @@ class Reconciler:
         # this later fold on the same (repo,sha) -- turning a correct RACE into a
         # clean PASS with nothing in any artifact to show it happened. The find
         # shard dbs in GCS are the same source of truth fold_find counts.
-        landed = len([u for u in ls(f"gs://{self.bucket}/find/{sha}/") if u.endswith(".db")])
+        landed = shardnames.distinct_shards(
+            [u for u in ls(f"gs://{self.bucket}/find/{sha}/") if u.endswith(".db")])
         rc = subprocess.run([
             os.path.join(HERE, "ledger-sync.sh"), "with",
             f"gs://{self.bucket}/ledger/cm-ledger.db", ledger, "--ok-codes", "0,1,2", "--",

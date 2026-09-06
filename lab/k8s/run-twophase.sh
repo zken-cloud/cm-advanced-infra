@@ -70,15 +70,26 @@ echo "PHASE 1.5: consolidate + dedup + ledger-suppress"
 # Aug-30 sidecars sitting next to freshly downloaded Sep-03 shards.
 mkdir -p /tmp/tp && rm -f /tmp/tp/*.db /tmp/tp/*.db-wal /tmp/tp/*.db-shm \
                          /tmp/tp/scrub-*.json /tmp/tp/coverage-*.json
-for i in $(seq 0 $((SHARDS-1))); do
-  gsutil cp "gs://$BUCKET/find/$SHA/$i.db" "/tmp/tp/$i.db" || true
-  gsutil cp "gs://$BUCKET/find/$SHA/scrub-$i.json" "/tmp/tp/scrub-$i.json" || true
-  # Coverage (Q13/D55). The find pods publish it; reconcile.py folds it; this path
-  # never fetched it, so every manual run reported "coverage: NONE SUPPLIED" and the
-  # sha stayed indistinguishable from unscanned -- the exact confusion the table exists
-  # to remove.
-  gsutil cp "gs://$BUCKET/find/$SHA/coverage-$i.json" "/tmp/tp/coverage-$i.json" || true
-done
+# Q15: a shard's retry cannot overwrite its predecessor (objectCreator, invariant 3),
+# so it publishes into the next free slot -- `0.2.db` beside `0.db`. Fetching
+# `$i.db` by name therefore silently pinned this path to the FIRST attempt, which is
+# the one that failed. Ask the bucket what is there, keep the newest slot per shard,
+# and save it under the canonical name so the four `/tmp/tp/*.db` globs below --
+# including the LANDED count -- keep working unchanged.
+#
+# Coverage (Q13/D55) comes down the same way. This path never fetched it at all
+# once, so every manual run reported "coverage: NONE SUPPLIED" and the sha stayed
+# indistinguishable from unscanned -- the exact confusion the table exists to remove.
+gsutil ls "gs://$BUCKET/find/$SHA/" 2>/dev/null | sed 's#.*/##' \
+  | python3 pipeline/shardnames.py --canonical > /tmp/tp/fetch.tsv || true
+while IFS=$'\t' read -r REMOTE LOCAL; do
+  case "$LOCAL" in
+    *.db|coverage-*.json|scrub-*.json) ;;
+    *) continue ;;
+  esac
+  [ "$REMOTE" = "$LOCAL" ] || echo "  shard artifact $REMOTE is a retry — using it as $LOCAL"
+  gsutil cp "gs://$BUCKET/find/$SHA/$REMOTE" "/tmp/tp/$LOCAL" || true
+done < /tmp/tp/fetch.tsv
 COVS=$(ls /tmp/tp/coverage-*.json 2>/dev/null | tr '\n' ' ')
 # provenance: what the agent was NOT shown (follow-up #1). One line per shard.
 echo "SCRUB PROVENANCE (what was withheld from the agent):"
