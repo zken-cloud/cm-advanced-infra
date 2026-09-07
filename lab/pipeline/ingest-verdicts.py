@@ -27,6 +27,8 @@ ledger = importlib.util.module_from_spec(_s); _s.loader.exec_module(ledger)
 
 # an agent-reported verdict string -> the ledger's vocabulary. Anything unknown is
 # recorded as 'error' (rank 1) rather than silently dropped or trusted.
+AGENT_UNKNOWN = "codemender-unknown"
+
 VERDICT_MAP = {"verified": "verified", "exploit_failed": "exploit_failed",
                "setup_failed": "setup_failed", "not_found": "not_found",
                "timeout": "timeout", "unproven": "unproven", "error": "error"}
@@ -41,7 +43,7 @@ def main():
     ap.add_argument("--shards-completed", type=int, required=True)
     ap.add_argument("--dispatch", help="dispatch.json — supplies meta for each fingerprint")
     ap.add_argument("--verdicts", nargs="*", default=[], help="verify/*.json envelopes")
-    ap.add_argument("--agent", default="codemender-unknown")  # a wrong stamp is
+    ap.add_argument("--agent", default=AGENT_UNKNOWN)  # a wrong stamp is
     # worse than an absent one: it attributes results to an agent that never ran
     ap.add_argument("--model", default="gemini-3")
     ap.add_argument("--ts", required=True)
@@ -94,6 +96,41 @@ def main():
         if fp not in newest or seq > newest[fp][0]:
             newest[fp] = (seq, f)
 
+    cov_envs = []
+    for f in a.coverage:
+        try:
+            cov_envs.append((f, json.load(open(f))))
+        except Exception as e:
+            print(f"  coverage: {os.path.basename(f)} unreadable ({e}) — SKIPPED, "
+                  f"this shard's files will look uncovered")
+
+    # PROVENANCE. Neither caller passes --agent: reconcile.py never has, and
+    # run-twophase.sh does not either, so every scan either of them folded recorded
+    # `codemender-unknown` while the coverage envelope sitting beside the shard knew
+    # the version exactly. Measured 2026-09-07 on a healthy 3/3 run: scans said
+    # codemender-unknown, coverage-1.json said codemender-0.5.0.
+    #
+    # That is worth closing now rather than later. Recall is a property of the agent
+    # version and does not only go up (EXPERIMENTS R5-3: 0.6.0 beats 0.4.0 at every K
+    # and loses V13 and V15 outright), so a finding nobody can attribute to a version
+    # cannot be compared against one.
+    #
+    # Coverage is used here as PROVENANCE, never as the completeness test: whether a
+    # sha was examined still keys on files_observed and never on this string, because
+    # the binary reports its version fine when the session dies (INCIDENTS 11).
+    agent = a.agent
+    if agent == AGENT_UNKNOWN and cov_envs:
+        seen = {e.get("agent_version") for _, e in cov_envs if e.get("agent_version")}
+        seen.discard(AGENT_UNKNOWN)
+        if len(seen) == 1:
+            agent = seen.pop()
+            print(f"  agent version from coverage: {agent}")
+        elif len(seen) > 1:
+            # Shards that disagree ran different binaries. Picking one would attribute
+            # every finding to an agent that produced only some of them.
+            print(f"  shards disagree on agent version {sorted(seen)} — recording "
+                  f"{AGENT_UNKNOWN}")
+
     def _algo(fp): return fp.split(":", 1)[0] if ":" in fp else "?"
     cur_algo = ledger.dedup.FP_ALGO
     mismatched = set()
@@ -121,7 +158,7 @@ def main():
         if fp not in meta_by_fp and a.dispatch:
             print(f"  WARN {fp}: not in dispatch — ingesting without meta")
         meta = dict(meta_by_fp.get(fp, {})); meta["source"] = "verify"
-        ledger.ingest(db, fp, meta, verdict, a.agent, a.model, a.ts,
+        ledger.ingest(db, fp, meta, verdict, agent, a.model, a.ts,
                       poc_uri=(v.get("poc_uri") or None))
         counts[verdict] = counts.get(verdict, 0) + 1
 
@@ -169,13 +206,6 @@ def main():
     # `max` over the shards, not `all`: one shard that genuinely looked is enough to
     # make this a scan, and this clause is aimed at the total outage, which is the
     # case that reads as clean.
-    cov_envs = []
-    for f in a.coverage:
-        try:
-            cov_envs.append((f, json.load(open(f))))
-        except Exception as e:
-            print(f"  coverage: {os.path.basename(f)} unreadable ({e}) — SKIPPED, "
-                  f"this shard's files will look uncovered")
     unexamined = False
     if cov_envs:
         cov_in_scope = max(int(e.get("files_in_scope") or 0) for _, e in cov_envs)
@@ -190,7 +220,7 @@ def main():
               f"NOT ONE observed by the agent — nothing examined this sha. The shards "
               f"published (invariant 5) but the agent never read the tree; recording "
               f"this as a completed scan is what let a CodeMender outage answer PASS.")
-    ledger.record_scan(db, a.repo, a.sha, a.shards_expected, landed, a.agent, a.ts)
+    ledger.record_scan(db, a.repo, a.sha, a.shards_expected, landed, agent, a.ts)
 
     # Q8/D57: the race, stamped where the facts are. `--pushed-at` comes from the
     # fan-out's RUN.json, which is the only place the developer's push time survives.

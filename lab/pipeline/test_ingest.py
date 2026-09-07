@@ -19,7 +19,7 @@ def _cov(tmp, n, in_scope, observed, scope="src"):
         f=os.path.join(tmp,f"coverage-{i}.json"); json.dump(env,open(f,"w")); paths.append(f)
     return paths
 
-def _run(tmp, verdicts, dispatch=None, shards=(3,3), sha="abc123", coverage=None):
+def _run(tmp, verdicts, dispatch=None, shards=(3,3), sha="abc123", coverage=None, agent=None):
     vd=os.path.join(tmp,"v"); os.makedirs(vd,exist_ok=True)
     for i,v in enumerate(verdicts): json.dump(v,open(os.path.join(vd,f"{i}.json"),"w"))
     dp=os.path.join(tmp,"d.json"); json.dump(dispatch or [],open(dp,"w"))
@@ -30,6 +30,7 @@ def _run(tmp, verdicts, dispatch=None, shards=(3,3), sha="abc123", coverage=None
         "--dispatch",dp,"--verdicts",os.path.join(vd,"*.json"),
         "--ts","2026-01-01T00:00:00Z"]
     if coverage: cmd+=["--coverage"]+coverage
+    if agent: cmd+=["--agent",agent]
     p=subprocess.run(cmd,capture_output=True,text=True)
     return p.returncode, p.stdout+p.stderr, led
 
@@ -90,6 +91,30 @@ def t_different_fingerprints_never_supersede_each_other():
            {"fingerprint":b,"cwe_class":"ssrf","canonical_path":"b.js","enclosing_function":"g"}])
         assert "superseded" not in out, out
         assert rc==1 and "BLOCK" in out, out
+
+def t_agent_version_comes_from_coverage_when_unset():
+    """Neither caller passes --agent, so scans recorded `codemender-unknown` while the
+    coverage envelope beside the shard knew the version. Measured on a healthy 3/3 run
+    2026-09-07. Recall is a property of the agent version, so an unattributed finding
+    cannot be compared against one."""
+    with tempfile.TemporaryDirectory() as t:
+        rc,out,_=_run(t,[],coverage=_cov(t,3,10,4))
+        assert "agent version from coverage: codemender-0.5.0" in out, out
+
+def t_shards_that_disagree_on_version_record_unknown():
+    """Picking one would attribute every finding to an agent that produced only some."""
+    with tempfile.TemporaryDirectory() as t:
+        covs=_cov(t,2,10,4)
+        e=json.load(open(covs[1])); e["agent_version"]="codemender-0.6.0"
+        json.dump(e,open(covs[1],"w"))
+        rc,out,_=_run(t,[],coverage=covs)
+        assert "disagree on agent version" in out and "codemender-unknown" in out, out
+
+def t_an_explicit_agent_flag_still_wins():
+    """--agent is the caller asserting what ran. Coverage only fills a gap."""
+    with tempfile.TemporaryDirectory() as t:
+        rc,out,_=_run(t,[],coverage=_cov(t,1,10,4),agent="codemender-9.9.9")
+        assert "agent version from coverage" not in out, out
 
 def t_stale_algo_is_refused():
     with tempfile.TemporaryDirectory() as t:
