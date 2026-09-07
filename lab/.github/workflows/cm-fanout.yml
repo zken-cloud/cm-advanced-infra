@@ -105,12 +105,30 @@ jobs:
           # same bucket -- invariant 3, and the reason runner_results is conditioned
           # to the find/ and verify/ prefixes. This is the same call the exporter in
           # 51-find-job.yaml already makes, with the same credential.
-          curl -sf -X POST \
+          #
+          # CREATE-ONLY, and 412 is success. Re-dispatching a sha -- a branch merged
+          # to main at the same commit, a re-run, a push that moves no code -- used to
+          # fail HERE with `-sf` turning a 403 into exit 22, AFTER `kubectl apply` had
+          # already created the Job. That is the half-dispatched state the comment
+          # above exists to prevent, produced by the line meant to prevent it.
+          # Measured 2026-09-07: `job.batch/cm-find-1095b38 unchanged` followed by
+          # `RUN.json published http=403`, workflow red, Job running fine.
+          # objectCreator cannot replace an object (invariant 3), so the honest
+          # request is a conditional create: 412 means this sha was dispatched before
+          # and the ORIGINAL dispatched_at stands -- which is what Q8's race wants,
+          # since the push is when the clock started, not the re-dispatch.
+          RUN_CODE=$(curl -s -X POST \
             -H "Authorization: Bearer $(gcloud auth print-access-token)" \
             -H 'Content-Type: application/json' \
             --data-binary @/tmp/RUN.json \
-            "https://storage.googleapis.com/upload/storage/v1/b/${{ vars.RESULTS_BUCKET }}/o?uploadType=media&name=find/$SHA/RUN.json" \
-            -o /dev/null -w "RUN.json published http=%{http_code}\n"
+            "https://storage.googleapis.com/upload/storage/v1/b/${{ vars.RESULTS_BUCKET }}/o?uploadType=media&ifGenerationMatch=0&name=find/$SHA/RUN.json" \
+            -o /dev/null -w '%{http_code}')
+          case "$RUN_CODE" in
+            2*)  echo "RUN.json published http=$RUN_CODE" ;;
+            412) echo "RUN.json already exists for $SHA — dispatched before; keeping the original dispatched_at (http=412)" ;;
+            *)   echo "::error::RUN.json publish FAILED http=$RUN_CODE — without it the reconciler cannot know shards_expected and will wait forever"
+                 exit 1 ;;
+          esac
           echo "dispatched $JOB for $SHA"
 
       # Deliberately NOT `kubectl wait`. The whole design is that nobody blocks here.
