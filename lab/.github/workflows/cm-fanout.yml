@@ -20,6 +20,17 @@ env:
   REGION: us-central1
   CLUSTER: cm-lab
   NS: cm
+  # The only two settings that are about the TARGET rather than the platform, so
+  # they are the two you change to point this pipeline at a different repository.
+  # Defaults reproduce the lab exactly, so an unset variable changes nothing.
+  #
+  # SCOPE is the subtree the agent reads. It is NOT cosmetic: it is the second
+  # control keeping the agent out of the answer key and the harvested rules, and a
+  # scope change silently invalidates every recall number taken at the old one.
+  # SCRUB names the documents withheld from the agent — anything in YOUR repo that
+  # describes its own bugs. Get it wrong and you are measuring reading comprehension.
+  SCOPE: ${{ vars.CM_SCOPE || 'src' }}
+  SCRUB_DOCS: ${{ vars.CM_SCRUB_DOCS || '--doc README.md --doc APP-README.md --doc .cm/rules/*.yaml --doc pipeline/harvested-rules/*.yaml' }}
 
 jobs:
   dispatch:
@@ -62,8 +73,8 @@ jobs:
                s#__REPO__#${{ github.event.repository.name }}#g; \
                s#__SHA__#$SHA#g; \
                s#__PROJECT__#${{ vars.GCP_PROJECT }}#g; \
-               s#__SCRUB__#--doc README.md --doc APP-README.md --doc .cm/rules/*.yaml --doc pipeline/harvested-rules/*.yaml#g; \
-               s#__SCOPE__#src#g" \
+               s#__SCRUB__#$SCRUB_DOCS#g; \
+               s#__SCOPE__#$SCOPE#g" \
             k8s/51-find-job.yaml | sed "s#name: cm-find#name: $JOB#" > /tmp/job.yaml
 
           # Fail LOUDLY on any placeholder the substitution missed. This whole class
@@ -86,12 +97,12 @@ jobs:
           cat > /tmp/RUN.json <<JSON
           {"sha":"$SHA","repo":"${{ github.event.repository.name }}",
            "repourl":"${{ github.server_url }}/${{ github.repository }}.git",
-           "shards":3,"scope":"src","tier":"critical,high","top_n":20,
+           "shards":3,"scope":"$SCOPE","tier":"critical,high","top_n":20,
            "max_parallelism":20,
            "project":"${{ vars.GCP_PROJECT }}",
            "image":"${{ vars.RUNNER_IMAGE }}",
            "poc_bucket":"${{ vars.POC_BUCKET }}",
-           "scrub":"--doc README.md --doc APP-README.md --doc .cm/rules/*.yaml --doc pipeline/harvested-rules/*.yaml",
+           "scrub":"$SCRUB_DOCS",
            "dispatched_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
           JSON
           # A direct media upload, NOT `gcloud storage cp`. cp issues a GET as part of

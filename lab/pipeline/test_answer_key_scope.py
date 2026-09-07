@@ -44,7 +44,22 @@ ANSWER_KEYS = ["pipeline/harvested-rules/harvested.yaml",
 def globs_of(text):
     # `}` is excluded so the last glob in a shell ${VAR:-...} default does not
     # capture the closing brace -- the value is correct, the naive regex was not.
-    return re.findall(r"--doc ([^\s\"#}\\]+)", text)
+    # `'` likewise, since the workflow default now lives inside a quoted GitHub
+    # expression: without it the LAST glob captured a trailing apostrophe and
+    # silently stopped matching, while every earlier one passed.
+    return re.findall(r"--doc ([^\s\"'#}\\]+)", text)
+
+
+def env_default(text, key):
+    """The fallback in `KEY: ${{ vars.SOMETHING || 'value' }}`.
+
+    SCOPE and SCRUB_DOCS became repository variables so this pipeline can be aimed
+    at another repo (Part D). The value that ships is the DEFAULT, so that is what
+    these controls have to read -- asserting on the sed line stopped proving
+    anything the moment the sed line became a variable reference.
+    """
+    m = re.search(key + r":\s*\$\{\{[^}]*\|\|\s*'([^']*)'\s*\}\}", text)
+    return m.group(1) if m else None
 
 
 # --- control 1: scope is never the whole tree -------------------------------
@@ -52,13 +67,15 @@ check("run-twophase defaults SCOPE to src, not '.' ('.' shows the agent pipeline
       re.search(r'SCOPE="\$\{SCOPE:-src\}"', TWOPHASE) is not None)
 check("run-twophase no longer defaults SCOPE to '.'",
       re.search(r'SCOPE="\$\{SCOPE:-\.\}"', TWOPHASE) is None)
-check("CI dispatches the find Job with SCOPE=src",
-      "s#__SCOPE__#src#g" in FANOUT)
+check("CI defaults SCOPE to src, not '.'",
+      env_default(FANOUT, "SCOPE") == "src")
+check("CI dispatches the find Job with the SCOPE it resolved",
+      "s#__SCOPE__#$SCOPE#g" in FANOUT)
 check("the reconciler falls back to src, never '.'",
       're.get' not in RECONCILE and 'run.get("scope", "src")' in RECONCILE)
 
 # --- control 2: both copies of the ruleset are scrubbed ----------------------
-for label, text in (("CI find dispatch", FANOUT),
+for label, text in (("CI find dispatch", env_default(FANOUT, "SCRUB_DOCS") or ""),
                     ("run-twophase default", TWOPHASE),
                     ("reconciler fallback", RECONCILE)):
     g = globs_of(text)
@@ -68,13 +85,17 @@ for label, text in (("CI find dispatch", FANOUT),
         check(f"{label}: scrub globs delete {key}", hit)
 
 # --- the RUN.json the reconciler reads must carry the same list --------------
+# It used to carry its own copy of the literal, which could drift from the sed line
+# above it. Both now read one variable, so the control is that they SHARE it: two
+# copies of one truth is D47, and a verify pod inheriting a different scrub list
+# than the find pod used is exactly the shape that hides.
 run_json = re.search(r'"scrub":"([^"]+)"', FANOUT)
 check("RUN.json carries a scrub list (verify pods inherit it)", run_json is not None)
-if run_json:
-    g = run_json.group(1).split()
-    for key in ANSWER_KEYS:
-        hit = any(fnmatch.fnmatch(key, p) for p in g if not p.startswith("--"))
-        check(f"RUN.json scrub list deletes {key}", hit)
+check("RUN.json and the find dispatch read the SAME scrub list",
+      run_json is not None and run_json.group(1) == "$SCRUB_DOCS"
+      and "s#__SCRUB__#$SCRUB_DOCS#g" in FANOUT)
+check("RUN.json carries the resolved scope, not a second literal",
+      re.search(r'"scope":"\$SCOPE"', FANOUT) is not None)
 
 # --- end to end: the real scrubber, on a tree shaped like a lab repo ---------
 with tempfile.TemporaryDirectory() as t:
@@ -90,7 +111,8 @@ with tempfile.TemporaryDirectory() as t:
     os.makedirs(os.path.join(t, "src"), exist_ok=True)
     open(os.path.join(t, "src", "app.js"), "w").write("const a = 1;\n")
     argv = ["python3", os.path.join(HERE, "scrub-answer-key.py"), t] + \
-        [x for pat in globs_of(FANOUT) for x in ("--doc", pat)]
+        [x for pat in globs_of(env_default(FANOUT, "SCRUB_DOCS") or "")
+         for x in ("--doc", pat)]
     subprocess.run(argv, capture_output=True, text=True)
     for rel in ANSWER_KEYS:
         check(f"end-to-end: {rel} is gone after the scrub",
