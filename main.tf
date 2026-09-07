@@ -53,6 +53,16 @@ locals {
     "bigquery.googleapis.com",
   ]
   repo_full = "${var.github_owner}/${var.lab_repo_name}"
+
+  # Every repository allowed to mint a token from this pool's provider. The lab
+  # repo always; anything in additional_wif_repos as well, so the pipeline can be
+  # aimed at a second repository without hand-editing the provider (Part D).
+  #
+  # The single-repo form is emitted verbatim when there is one repo, so an
+  # existing lab sees NO diff on the next apply -- a provider update here is a
+  # security control changing, and it should never happen as a side effect.
+  wif_repos     = concat([local.repo_full], var.additional_wif_repos)
+  wif_condition = length(local.wif_repos) == 1 ? "assertion.repository == \"${local.wif_repos[0]}\"" : "assertion.repository in [${join(", ", [for r in local.wif_repos : "\"${r}\""])}]"
 }
 
 resource "google_project_service" "svc" {

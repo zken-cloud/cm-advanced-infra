@@ -109,3 +109,18 @@ variable "create_wif_pool" {
   type    = bool
   default = true
 }
+
+variable "additional_wif_repos" {
+  description = <<-EOT
+    Extra owner/repo entries allowed to mint a token from this lab's WIF provider,
+    beyond the lab repo itself. Use it to aim the pipeline at another repository
+    (Part D) instead of editing the provider by hand.
+
+    This is THE control that stops any repository on GitHub minting a token for
+    your service accounts, so keep it to repos you intend. Adding a repo here is
+    only half the job: the cluster half's `github_repos` must list it too, or the
+    token will be issued and then refused at impersonation.
+  EOT
+  type        = list(string)
+  default     = []
+}

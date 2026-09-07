@@ -30,7 +30,12 @@ resource "google_iam_workload_identity_pool_provider" "github" {
 
   # THE control. Without it, ANY repo on GitHub can mint a token for your service
   # accounts -- a full project compromise, and the most common WIF mistake.
-  attribute_condition = "assertion.repository == \"${local.repo_full}\""
+  # A LIST, because the bindings in the cluster half are a list too, and the two
+  # must agree: a token from this pool is only useful if the service account it
+  # impersonates trusts THIS pool. Mismatch them and auth succeeds and the next
+  # step dies with `iam.serviceAccounts.getAccessToken denied`, which names
+  # neither pool. Measured 2026-09-07.
+  attribute_condition = local.wif_condition
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"

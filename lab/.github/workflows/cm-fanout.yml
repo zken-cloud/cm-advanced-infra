@@ -38,6 +38,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Print the identity BEFORE using it. Both ways this can fail name neither
+      # the pool nor the repo, and you cannot tell them apart from the message:
+      #   auth fails      -> the provider's attribute_condition rejects this repo
+      #   auth OK, next
+      #   step 403s on
+      #   getAccessToken  -> the service account trusts a DIFFERENT pool
+      # The second is the nasty one: the token is real, and the pool it came from
+      # is not the pool the binding names. Measured 2026-09-07, and the only way
+      # to see it was to read both by hand.
+      - name: Which identity is this run about to assume
+        run: |
+          echo "provider: ${{ vars.WIF_PROVIDER }}"
+          echo "pool:     $(echo '${{ vars.WIF_PROVIDER }}' | sed -nE 's#.*/workloadIdentityPools/([^/]+)/.*#\1#p')"
+          echo "sa:       cm-lab-runner@${{ vars.GCP_PROJECT }}.iam.gserviceaccount.com"
+          echo "repo:     ${{ github.repository }}"
+
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
