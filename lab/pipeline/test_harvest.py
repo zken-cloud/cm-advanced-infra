@@ -97,4 +97,29 @@ if __name__=="__main__":
     print(f"{'PASS' if ok else 'FAIL'}  {'unknown-class':22} names the classes that do exist")
     extra += ok
     print(f"{extra}/{len(INFEASIBLE_CASES)+1} refusal messages correct")
-    sys.exit(0 if passed==len(CASES) and extra==len(INFEASIBLE_CASES)+1 else 1)
+
+    # The self-check: does the minted rule match the code it was minted FROM?
+    # A rule that fires on an idealised pair and matches nothing in the real file
+    # ships as coverage and can never fire. Measured on a real shard 2026-09-07:
+    # CWE-94 via [].sort.constructor and CWE-78 via spawn(opts) both did exactly that.
+    sc = 0
+    for label, code, want in [
+        ("obvious sink is matched",   "module.exports.f = (q) => eval(q);\n", True),
+        ("evasive sink is not",       "module.exports.f = (q) => [].sort.constructor('return '+q)();\n", False),
+    ]:
+        with tempfile.TemporaryDirectory() as t:
+            os.makedirs(os.path.join(t, "src"), exist_ok=True)
+            open(os.path.join(t, "src", "admin.service.js"), "w").write(code)
+            y = make_rule("code-injection")
+            hit, detail = H.self_check(y, {"file_path": "src/admin.service.js"}, t)
+            ok = hit is want
+            print(f"{'PASS' if ok else 'FAIL'}  self-check: {label:34} {hit} ({detail})")
+            sc += ok
+    with tempfile.TemporaryDirectory() as t:
+        hit, detail = H.self_check(make_rule("code-injection"),
+                                   {"file_path": "nope.js"}, t)
+        ok = hit is None
+        print(f"{'PASS' if ok else 'FAIL'}  self-check: {'a missing file is unknown, not a pass':34} {hit}")
+        sc += ok
+    print(f"{sc}/3 self-check cases correct")
+    sys.exit(0 if passed==len(CASES) and extra==len(INFEASIBLE_CASES)+1 and sc==3 else 1)

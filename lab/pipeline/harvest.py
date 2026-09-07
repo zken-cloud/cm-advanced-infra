@@ -212,11 +212,51 @@ def to_yaml(rule):
         lines.append(f"      {k}: {esc(v)}")
     return "\n".join(lines)+"\n"
 
+def self_check(rule_yaml, finding, src_root):
+    """Does the minted rule actually match the finding it was minted FROM?
+
+    A rule that fires on an idealised before/after pair can still match nothing in
+    the code it came from — harvest-validate.py has said so since it was written, and
+    it needs the answer key, which a participant does not have. So the check that
+    matters most is the one they could never run.
+
+    It matters most on THIS target. `vulnerable-app` is a SAST-bypass lab: the planted
+    bugs are shaped to evade pattern rules, which is the 13% semgrep baseline the whole
+    argument rests on. Measured 2026-09-07 against a real shard:
+
+      CWE-94  admin.service.js   `[].sort.constructor` — not eval, not new Function
+      CWE-78  systemUtils.js     spawn(..., opts) with a merged shell:true — not exec
+
+    Both minted a clean-looking rule that matched their own finding zero times. A rule
+    like that is worse than no rule: it reads as coverage and cannot ever fire.
+    """
+    import glob as _g, subprocess as _sp, tempfile as _tf
+    want = os.path.basename(finding.get("file_path") or "")
+    hits = _g.glob(os.path.join(src_root, "**", want), recursive=True) if want else []
+    if not hits:
+        return None, f"{want or 'the finding'} not found under {src_root}"
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as t:
+        t.write(rule_yaml); rp = t.name
+    try:
+        r = _sp.run(["semgrep","--quiet","--json","--no-git-ignore","--metrics=off",
+                     "--config",rp,hits[0]], capture_output=True, text=True, timeout=300)
+        if r.returncode not in (0,1):
+            return None, (r.stderr or "semgrep failed")[-160:]
+        n = len(json.loads(r.stdout).get("results",[]))
+        return n > 0, f"{n} match(es) in {os.path.basename(hits[0])}"
+    except Exception as e:
+        return None, str(e)
+    finally:
+        os.unlink(rp)
+
+
 if __name__=="__main__":
     ap=argparse.ArgumentParser()
     ap.add_argument("db"); ap.add_argument("finding_id_prefix")
     ap.add_argument("--fingerprint",default="fp3:unknown"); ap.add_argument("--poc")
     ap.add_argument("-o","--out")
+    ap.add_argument("--src-root", help="check the minted rule actually matches the "
+                    "finding it came from, and say so loudly when it does not")
     a=ap.parse_args()
     f=load_finding(a.db,a.finding_id_prefix)
     if not f: sys.exit(f"no finding {a.finding_id_prefix}")
@@ -225,3 +265,16 @@ if __name__=="__main__":
     y=to_yaml(rule)
     if a.out: open(a.out,"w").write(y); print(f"wrote {a.out}")
     else: print(y)
+    if a.src_root:
+        hit, detail = self_check(y, f, a.src_root)
+        if hit is True:
+            print(f"  self-check: rule matches its own finding ({detail})")
+        elif hit is False:
+            print(f"  SELF-CHECK FAILED: this rule matches its own finding ZERO times "
+                  f"({detail}).\n"
+                  f"  It will ship as coverage and can never fire. That is usually the "
+                  f"finding telling you something: a defect shaped to evade pattern "
+                  f"rules is why CodeMender found it and semgrep did not. Keep the PoC "
+                  f"as the regression cover and do not gate on this rule.")
+        else:
+            print(f"  self-check: could not run ({detail})")
